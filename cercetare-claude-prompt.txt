@@ -1,0 +1,31 @@
+Cercetare-Research — Claude Q&A Log
+====================================
+This file logs every question asked and the detailed answer given in this project,
+unless the prompt explicitly says not to log it.
+
+----------------------------------------
+
+[2026-08-22]
+
+Q: Star a new file named cercetare-claude-prompt.txt where typu will log all the questions and the detailed answers you will provide in this project. You will log there if if I do not mantion that in the prompt.
+
+A: Created cercetare-claude-prompt.txt at the repository root (/Users/tudor/Documents/GitHub/Cercetare-Research/cercetare-claude-prompt.txt). Going forward, every question and detailed answer in this project will be appended here by default, unless a given prompt explicitly says not to log it.
+
+----------------------------------------
+
+Q: Let's open a new file named requirements.txt where I will write briefly some of the requirements of this project.
+
+A: Created an empty requirements.txt at the repository root (/Users/tudor/Documents/GitHub/Cercetare-Research/requirements.txt) for you to fill in with the project's requirements.
+
+----------------------------------------
+
+Q: Create a new notebook in RomanianComp folder, name data-download-firme-rom.ipynb where we'll test and implement data download from different sites as required by the project. We'll add many cells with each new source of data. In the first cell we should configure what data download is active (one or many) so we can have everything in one notebook but work actively with only what is of interest at the moment. We will add data sources as we discover them.
+
+A: Created RomanianComp/Notebooks/data-download-firme-rom.ipynb (placed in the existing empty RomanianComp/Notebooks subfolder). Structure:
+- Intro markdown cell explaining the notebook's purpose (data download for Romanian companies, per requirements.txt).
+- A shared imports cell (requests, pandas).
+- A configuration cell with an ACTIVE_SOURCES dict (one bool per source: onrc, mfinante, portal_just, listafirme, totalfirme) and an is_active(source) helper, so any combination of sources can be toggled on/off without touching the rest of the notebook.
+- One markdown+code cell pair per source found in requirements.txt (onrc.ro, mfinante.ro, portal.just.ro, listafirme.ro, totalfirme.ro), each code cell guarded by `if is_active(...)` with a TODO placeholder for the real scraping/download logic, and a printed skip message when inactive.
+- A trailing markdown note describing the convention for adding new sources later (new key in ACTIVE_SOURCES + a new markdown/code cell pair).
+
+----------------------------------------

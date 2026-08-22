@@ -1,0 +1,22 @@
+registrul comertului:
+
+Various websites where we can get the data from:
+
+onrc.ro
+mfinante.ro
+portal.just.ro
+listafirme.ro
+totalfirme.ro
+
+Integrarea : pentru coduri caen care sunt trendurile industriei?
+Care este profitabilittaea medie a codului CAEN (judet, tara, etc).
+O companie - 1 cod CAEN
+Ierarhizarea firmei in functie de cifra de afaceri (revenue)
+
+Oportunitati de investitii, de afaceri
+Care ar fi activitatea care ar aduce cea mai buna profitabilitate
+
+Interfata visuala
+
+Interfata conversationala
+
