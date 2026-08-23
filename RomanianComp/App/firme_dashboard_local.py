@@ -1,13 +1,15 @@
 """
-Dashboard Streamlit - Firme din Romania (bl_bs_sl, strat L2) — VERSIUNEA DEPLOYATA (Cloud)
+Dashboard Streamlit - Firme din Romania (bl_bs_sl, strat L2) — COPIE LOCALA DE TESTARE
 
-Acesta e fisierul pe care il ruleaza Streamlit Cloud ("main file path" configurat acolo).
-Pentru experimentat local fara sa afectezi site-ul public, foloseste in schimb
-`firme_dashboard_local.py` (copie separata) - si copiaza aici modificarile doar cand esti
-sigur ca vrei sa ajunga pe Cloud.
+Aceasta e o copie separata de `firme_dashboard.py`, folosita pentru experimentat local.
+Streamlit Cloud ruleaza doar `firme_dashboard.py` (asa e configurat "main file path" in
+Cloud) - modificarile facute aici, chiar daca sunt impinse pe `main`, NU ajung pe site-ul
+public pana nu le copiezi manual in `firme_dashboard.py`. Un `git push` care atinge doar
+acest fisier tot va declansa un rebuild pe Cloud (urmareste tot repo-ul), dar comportamentul
+aplicatiei deployate ramane neschimbat, fiindca Cloud citeste tot `firme_dashboard.py`.
 
 Ruleaza cu:
-    streamlit run firme_dashboard.py
+    streamlit run firme_dashboard_local.py
 
 Utilizatorul alege intreaga tara sau un judet; interfata afiseaza 4 grafice
 (histograma cifrei de afaceri, histograma numarului de salariati, bar chart
