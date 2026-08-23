@@ -13,6 +13,13 @@ Datele L2 sunt Parquet (nu CSV) si sunt citite via DuckDB: filtrarea pe judet
 se face direct in fisier (predicate pushdown), fara sa incarcam tabelul intreg
 in memorie la fiecare selectie - relevant pentru un deploy cu resurse limitate
 (Streamlit Cloud/Replit).
+
+Datele citite aici sunt doar subsetul mic necesar acestui dashboard (bl_bs_sl_l2.parquet
++ N_CAEN.csv, ~7MB), copiat in `data/` (langa acest script) si tinut in git - nu intregul
+lac de date de la `data.gov.ro/l2_data/` (vezi data-download-firme-rom.ipynb), care ramane
+local, in afara repo-ului. Cand rulezi din nou notebook-ul de download si vrei ca acest
+dashboard sa reflecte datele noi, recopiaza cele 2 fisiere din `data.gov.ro/l2_data/` si
+`data.gov.ro/ref_data/` peste cele din `data/`.
 """
 
 from pathlib import Path
@@ -23,10 +30,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-L2_DIR = Path("/Users/tudor/Documents/Data-for-Projects/Cercetare-Research/data.gov.ro/l2_data")
-REF_DATA_DIR = Path("/Users/tudor/Documents/Data-for-Projects/Cercetare-Research/data.gov.ro/ref_data")
+DATA_DIR = Path(__file__).parent / "data"
 
-BL_BS_SL_PARQUET = L2_DIR / "bl_bs_sl_l2.parquet"
+BL_BS_SL_PARQUET = DATA_DIR / "bl_bs_sl_l2.parquet"
+N_CAEN_CSV = DATA_DIR / "N_CAEN.csv"
 
 TOATA_TARA = "Toata tara"
 
@@ -60,7 +67,7 @@ def incarca_scop(judet: str | None) -> pd.DataFrame:
 def incarca_denumiri_caen() -> pd.Series:
     """cod CAEN (4 cifre) -> denumire activitate, preferand cea mai recenta versiune a nomenclatorului
     (acelasi cod poate insemna activitati diferite in versiuni CAEN diferite: 1998/2003/2008/2025)."""
-    df_caen = pd.read_csv(REF_DATA_DIR / "N_CAEN.csv", sep="^", encoding="utf-8-sig", dtype=str)
+    df_caen = pd.read_csv(N_CAEN_CSV, sep="^", encoding="utf-8-sig", dtype=str)
     df_caen["CLASA"] = df_caen["CLASA"].str.strip()
     coduri = df_caen[df_caen["CLASA"].str.fullmatch(r"\d{4}", na=False)]
     return (
@@ -77,6 +84,7 @@ def histograma_log10(ax, valori: pd.Series, titlu: str, eticheta_x: str, culoare
     ax.set_title(f"{titlu}\n({excluse} firme cu valoare <=0 sau lipsa excluse)", fontsize=10)
     ax.set_xlabel(eticheta_x)
     ax.set_ylabel("numar firme")
+    ax.grid(True, alpha=0.3)
 
 
 st.set_page_config(page_title="Firme din Romania - bl_bs_sl", layout="wide")
@@ -129,6 +137,7 @@ else:
         ax.barh(afisare["cod_caen"], afisare["numar_firme"], color="seagreen")
         ax.set_title("Top 10 coduri CAEN", fontsize=10)
         ax.set_xlabel("numar firme")
+        ax.grid(True, alpha=0.3)
         st.pyplot(fig)
 
     with coloana_dreapta2:
@@ -142,6 +151,7 @@ else:
         ax.set_title("Cifra de afaceri vs. nr. salariati (log-log)", fontsize=10)
         ax.set_xlabel("log10(numar_mediu_de_salariati)")
         ax.set_ylabel("log10(cifra_de_afaceri_neta)")
+        ax.grid(True, alpha=0.3)
         st.pyplot(fig)
 
     st.subheader("Top 10 coduri CAEN - detaliu")
