@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: firme-romania-dashboard
+    runtime: python
+    plan: free
+    rootDir: RomanianComp/App
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run firme_dashboard.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.15
