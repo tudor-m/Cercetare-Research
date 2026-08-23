@@ -8,10 +8,16 @@ Utilizatorul alege intreaga tara sau un judet; interfata afiseaza 4 grafice
 (histograma cifrei de afaceri, histograma numarului de salariati, bar chart
 cu top 10 coduri CAEN, scatter cifra de afaceri vs. salariati) plus un tabel
 cu cele 10 coduri CAEN si denumirea activitatii.
+
+Datele L2 sunt Parquet (nu CSV) si sunt citite via DuckDB: filtrarea pe judet
+se face direct in fisier (predicate pushdown), fara sa incarcam tabelul intreg
+in memorie la fiecare selectie - relevant pentru un deploy cu resurse limitate
+(Streamlit Cloud/Replit).
 """
 
 from pathlib import Path
 
+import duckdb
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -20,15 +26,34 @@ import streamlit as st
 L2_DIR = Path("/Users/tudor/Documents/Data-for-Projects/Cercetare-Research/data.gov.ro/l2_data")
 REF_DATA_DIR = Path("/Users/tudor/Documents/Data-for-Projects/Cercetare-Research/data.gov.ro/ref_data")
 
+BL_BS_SL_PARQUET = L2_DIR / "bl_bs_sl_l2.parquet"
+
 TOATA_TARA = "Toata tara"
+
+# cateva coduri CAEN din sursa lipsesc zero-ul de inceput (ex. "154" in loc de "0154")
+_SELECT_CU_COD_CAEN = f"""
+    SELECT *, LPAD(TRIM(CAST(caen AS VARCHAR)), 4, '0') AS cod_caen
+    FROM '{BL_BS_SL_PARQUET.as_posix()}'
+"""
 
 
 @st.cache_data
-def incarca_bl_bs_sl() -> pd.DataFrame:
-    df = pd.read_csv(L2_DIR / "bl_bs_sl_l2.csv", encoding="utf-8-sig")
-    # cateva coduri CAEN din sursa lipsesc zero-ul de inceput (ex. "154" in loc de "0154")
-    df["cod_caen"] = df["caen"].astype(str).str.strip().str.zfill(4)
-    return df
+def incarca_judete() -> list[str]:
+    query = f"""
+        SELECT DISTINCT ADR_JUDET FROM '{BL_BS_SL_PARQUET.as_posix()}'
+        WHERE ADR_JUDET IS NOT NULL
+        ORDER BY ADR_JUDET
+    """
+    return duckdb.sql(query).df()["ADR_JUDET"].tolist()
+
+
+@st.cache_data
+def incarca_scop(judet: str | None) -> pd.DataFrame:
+    """Incarca doar randurile firmelor din judetul ales (sau toata tara daca judet e None),
+    filtrate direct in Parquet - nu incarcam niciodata tabelul intreg doar ca sa il filtram in pandas."""
+    if judet is None:
+        return duckdb.sql(_SELECT_CU_COD_CAEN).df()
+    return duckdb.execute(_SELECT_CU_COD_CAEN + " WHERE ADR_JUDET = ?", [judet]).df()
 
 
 @st.cache_data
@@ -57,16 +82,12 @@ def histograma_log10(ax, valori: pd.Series, titlu: str, eticheta_x: str, culoare
 st.set_page_config(page_title="Firme din Romania - bl_bs_sl", layout="wide")
 st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
 
-df_bl_bs_sl = incarca_bl_bs_sl()
 denumiri_caen = incarca_denumiri_caen()
 
-judete = [TOATA_TARA] + sorted(df_bl_bs_sl["ADR_JUDET"].dropna().unique().tolist())
+judete = [TOATA_TARA] + incarca_judete()
 scop_selectat = st.sidebar.selectbox("Alege scopul", judete)
 
-if scop_selectat == TOATA_TARA:
-    df_scop = df_bl_bs_sl
-else:
-    df_scop = df_bl_bs_sl[df_bl_bs_sl["ADR_JUDET"] == scop_selectat]
+df_scop = incarca_scop(None if scop_selectat == TOATA_TARA else scop_selectat)
 
 st.subheader(f"{scop_selectat} — {len(df_scop)} firme")
 
