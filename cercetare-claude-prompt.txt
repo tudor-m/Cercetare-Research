@@ -29,3 +29,115 @@ A: Created RomanianComp/Notebooks/data-download-firme-rom.ipynb (placed in the e
 - A trailing markdown note describing the convention for adding new sources later (new key in ACTIVE_SOURCES + a new markdown/code cell pair).
 
 ----------------------------------------
+
+[2026-08-23]
+
+Q: So far the project uses csv files to keep the data (download from the net and used to run analytics). The size is already 1.9GB, with only 1 year of data (2025). Wouldn't it be a better option to have parquet files as well and read the data via DuckDB? In case we want to move it to Streamlit Cloud or Replit, that would give a much smaller footprint. What do you think?
+
+A: Recommended Parquet + DuckDB: columnar compression (expected 5-10x smaller), faster filtering/aggregation without loading everything into memory, and a much lighter footprint for a cloud deploy. Flagged the main tradeoff (a conversion step, a new dependency, downstream code moving off pandas.read_csv). Offered to inspect the notebooks and sketch a concrete plan before implementing anything.
+
+----------------------------------------
+
+Q: Have a look, the advantages are pretty clear.
+
+A: Inspected data-download-firme-rom.ipynb, analytics-1-firme-rom.ipynb, App/firme_dashboard.py, and the actual data on disk (all outside the repo, under ~/Documents/Data-for-Projects/Cercetare-Research/data.gov.ro/): firme-03-02-2026/ raw ONRC registry CSVs (1.2GB), l2_data/ consolidated L2 tables (459MB), finance_2025/ raw financial statements (93MB), ref_data/ nomenclatures (292KB). Found firme_dashboard.py only actually reads bl_bs_sl_l2.csv (21MB) + N_CAEN.csv (270KB) - the deployed app's real footprint was already tiny. Proposed converting L2 output to Parquet and switching the analytics notebook + dashboard to DuckDB; asked the user to scope the work (L2+dashboard only vs. also raw ingestion) - user chose L2+dashboard only.
+
+Implemented: converted the 5 existing L2 CSVs to Parquet (zstd) directly with DuckDB and verified row/column/value parity against the CSVs (uu_l2 229MB->71MB, caen_autorizat_l2 199MB->17MB, stare_firma_l2 32MB->6.1MB, bl_bs_sl_l2 22MB->7.0MB - roughly 3-12x smaller). Edited data-download-firme-rom.ipynb's L2-writing cell to write Parquet via pandas.to_parquet(engine="pyarrow", compression="zstd") instead of CSV, updated its markdown docs. Rewrote analytics-1-firme-rom.ipynb's load_l2() loader to query Parquet via DuckDB (optional where= pushdown filter). Rewrote App/firme_dashboard.py to read Parquet via DuckDB, pushing the judet filter into SQL instead of loading the full table into pandas. Added App/requirements.txt (streamlit, pandas, duckdb, matplotlib, numpy). Installed duckdb into the anaconda3 base environment. Verified the dashboard starts cleanly headless (HTTP 200) and DuckDB queries return correct results.
+
+----------------------------------------
+
+Q: I would like to have in L2 both csv and parquet alongside, at least for a while.
+
+A: Changed the L2-writing cell in data-download-firme-rom.ipynb to a write_l2(df, stem) helper that writes both {stem}.parquet and {stem}.csv, each checked/skipped independently (respecting FORCE_REBUILD_L2), so re-running the notebook won't clobber whichever format already exists. Updated the markdown to explain the transition-period rationale. Confirmed both formats were already present side by side on disk in l2_data/ for all 5 tables.
+
+----------------------------------------
+
+Q: Add grid on all plots (notebook and app).
+
+A: Added ax.grid(True, alpha=0.3) to every matplotlib plot: the 3 plot spots in App/firme_dashboard.py (histogram helper, CAEN bar chart, scatter), and both plotting cells in analytics-1-firme-rom.ipynb (the 2x3 grid and the per-judet 1x4 loop). Re-ran the dashboard headless to confirm it still starts (HTTP 200).
+
+----------------------------------------
+
+Q: Explain how to read the plots where the horizontal axis is log10.
+
+A: Explained the axis literally shows log10(value) (10^(axis value) = real value, not ax.set_xscale('log')), gave a quick conversion table (0->1, 1->10, ... 7->10,000,000), and explained how to read each chart type: histograms (+1 on axis = 10x the value), the log-log scatter (straight diagonal = power-law relationship; slope ~1 means roughly constant revenue-per-employee), and noted the bar charts (CAEN codes, judete, forma juridica) are not log-scaled.
+
+----------------------------------------
+
+Q: You installed duckdb in the env. If I check with Anaconda Navigator it doesn't show as installed. Why?
+
+A: Investigated: conda env list showed base, porto-folio, research-ro-ios (plus an unrelated micromamba env). duckdb had been installed via pip into base only. Checked analytics-1-firme-rom.ipynb's saved kernelspec metadata and found it's pinned to "research-ro-ios" - the actual environment that notebook runs under - which had pandas/streamlit/matplotlib/pyarrow but not duckdb, so the notebook would genuinely have failed there despite an earlier "it works" test that had (mistakenly) run against base. Fixed by installing duckdb into research-ro-ios via conda-forge (matching how its other packages were installed), verified the import and re-ran the dashboard headless using that environment's streamlit (HTTP 200). Left the unrelated porto-folio env untouched.
+
+----------------------------------------
+
+Q: What should I do/change to publish the app on Streamlit Cloud (free tier)?
+
+A: Searched Streamlit's current docs for Community Cloud requirements: needs a requirements.txt discoverable from the entrypoint's own folder or repo root; free tier is 1GB RAM, apps sleep after 12 hours idle, unlimited public apps but only one private app, no custom domain. Identified the real blocker: firme_dashboard.py read from an absolute path on the user's Mac that wouldn't exist in Cloud's container. Fixed by copying the two small files the app actually needs (bl_bs_sl_l2.parquet 6.7MB, N_CAEN.csv 270KB) into a new RomanianComp/App/data/ folder meant to be committed to git, and switching the app to DATA_DIR = Path(__file__).parent / "data" (portable locally and in the cloud). Verified the app still runs headless with only the bundled files. Gave the deploy steps (push, share.streamlit.io -> New app -> repo/branch/main-file-path) and noted App/data/ needs manual re-copying after future L2 regenerations.
+
+----------------------------------------
+
+Q: What is easier to deploy: Streamlit or Replit?
+
+A: Searched current guidance on deploying Streamlit apps on Replit. Recommended Streamlit Community Cloud: it auto-detects everything from the GitHub repo with zero extra config (already verified working), whereas Replit needs a hand-configured .replit file, binding to $PORT/0.0.0.0, and its free tier no longer reliably supports public always-on "Deployments" without upgrading to paid Replit Core. Recommended sticking with the Streamlit Cloud path already prepared.
+
+----------------------------------------
+
+Q: OK, so let's do the changes to prepare for Streamlit Cloud deployment.
+
+A: Found the download-notebook Parquet/CSV changes were already committed by the user directly (commit 5b032af "Updates - parquet files"). Staged and committed the remaining deployment-prep work (bundled App/data/, the relative-path change in firme_dashboard.py, the gridline additions) as commit f3e8434 "Prepare dashboard for Streamlit Cloud deployment; add plot gridlines" - left locally committed, not pushed, pending the user's review.
+
+----------------------------------------
+
+Q: Did you commit the changes?
+
+A: Confirmed yes - f3e8434 on main, locally committed but not yet pushed to origin.
+
+----------------------------------------
+
+Q: I pushed.
+
+A: Fetched/verified origin/main is at f3e8434, branch up to date. Reiterated the remaining manual step: create the app on share.streamlit.io pointing at RomanianComp/App/firme_dashboard.py.
+
+----------------------------------------
+
+Q: Streamlit Cloud has security issues I am not comfortable with. What about deploying via Render?
+
+A: Did not push back on the platform switch. Researched Render's current free-tier deployment flow for Streamlit apps (no card required, web service, spins down after ~15 min idle with ~1 min cold start, needs --server.port $PORT --server.address 0.0.0.0). Added render.yaml at repo root (Blueprint config: rootDir RomanianComp/App, build pip install -r requirements.txt, start streamlit run firme_dashboard.py --server.port $PORT --server.address 0.0.0.0 --server.headless true, free plan, Python 3.13.15) and RomanianComp/App/.streamlit/config.toml (headless=true, gatherUsageStats=false). Verified locally by exporting PORT and running the exact start command (HTTP 200). Committed as 63c1d6f "Add Render deployment config" (not pushed), gave both the Blueprint deploy steps and a manual-fallback configuration.
+
+----------------------------------------
+
+Q: OK I made the repo public so I will publish via Streamlit Cloud for now.
+
+A: Confirmed origin/main already had 63c1d6f (everything pushed, in sync), noted the unused render.yaml is harmless sitting in the repo, repeated the Streamlit Cloud deploy steps (share.streamlit.io -> New app -> tudor-m/Cercetare-Research -> main -> RomanianComp/App/firme_dashboard.py -> Deploy).
+
+----------------------------------------
+
+Q: OK, deployed, good.
+
+A: Acknowledged; offered to automate the App/data/ refresh step for future L2 regenerations.
+
+----------------------------------------
+
+Q: I would like to have 2 files: one for the cloud deployment, one for the local deployment, so I can test locally without impacting the cloud version. Does it make sense? Is that possible?
+
+A: Explained Streamlit Cloud only redeploys on a push to the watched branch (main) - local edits and local streamlit run sessions never touch it regardless. Recommended a branch workflow over duplicate files (avoids logic drift) but let the user choose via a structured question (branch workflow / branch workflow + staging cloud app / two separate script files). User chose two separate script files, explicitly accepting the drift tradeoff. Implemented: duplicated firme_dashboard.py into firme_dashboard_local.py (identical content, distinguishing docstring explaining it's the free-to-edit sandbox that Cloud never reads), added a matching docstring note to firme_dashboard.py marking it as the Cloud-tracked file, verified firme_dashboard_local.py runs standalone (HTTP 200). Committed as a7a6dbd "Split dashboard into cloud-tracked and local-sandbox copies" (not pushed), with the caveat that pushing will still trigger a brief Cloud rebuild/restart (it watches the whole repo) even though the deployed app's behavior won't change.
+
+----------------------------------------
+
+Q: What is .DS_Store file? Do I have to commit it?
+
+A: Explained it's macOS Finder's per-folder metadata file (view settings), silently rewritten by Finder, irrelevant to other collaborators/CI, and shouldn't be committed. Found it's already listed in .gitignore but was tracked before that rule existed, so git kept diffing it anyway. Offered to untrack it.
+
+----------------------------------------
+
+Q: Yes, untrack them and remove them from the repo.
+
+A: Ran git rm --cached on .DS_Store and RomanianComp/.DS_Store (kept on disk, removed from git tracking) and committed as 2ff4360 "Untrack .DS_Store files" (not pushed). Noted an unrecognized commit 2ddde5a "Updates" in the log that the user must have made directly, flagged in case it's still unpushed.
+
+----------------------------------------
+
+Q: Please keep storing the detailed conversation in the file cercetare-claude-prompt.txt. Do that after every prompt and answer, do not wait for my command.
+
+A: Backfilled this entire session's Q&A into this log (the entries above, from the Parquet/DuckDB discussion through untracking .DS_Store) under a new [2026-08-23] section, matching the file's existing format. Going forward, every prompt and detailed answer in this project will be appended here automatically after each turn, without needing to be asked, unless a given prompt explicitly says not to log it - consistent with the convention already stated in this file's header. Also saved this as a standing project convention in memory so future sessions resume the same logging habit from the start.
+
+----------------------------------------

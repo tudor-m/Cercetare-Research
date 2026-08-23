@@ -11,15 +11,25 @@ aplicatiei deployate ramane neschimbat, fiindca Cloud citeste tot `firme_dashboa
 Ruleaza cu:
     streamlit run firme_dashboard_local.py
 
-Utilizatorul alege intreaga tara sau un judet; interfata afiseaza 4 grafice
-(histograma cifrei de afaceri, histograma numarului de salariati, bar chart
-cu top 10 coduri CAEN, scatter cifra de afaceri vs. salariati) plus un tabel
-cu cele 10 coduri CAEN si denumirea activitatii.
+Doua "tab-uri" (nu `st.tabs()` - vezi mai jos de ce - ci navigate printr-un radio in sidebar):
+- "Analiza pe judet": (ca in firme_dashboard.py) utilizatorul alege intreaga tara sau un
+  judet din sidebar; interfata afiseaza 4 grafice (histograma cifrei de afaceri, histograma
+  numarului de salariati, bar chart cu top 10 coduri CAEN, scatter cifra de afaceri vs.
+  salariati) plus un tabel cu cele 10 coduri CAEN si denumirea activitatii.
+- "Analiza pe CAEN - baza": replica analizei din analytics-1-firme-rom.ipynb (celula
+  "Top 100 firme per cod CAEN"). Utilizatorul alege din sidebar un cod CAEN (din top 50
+  dupa numarul de firme); tabelul afiseaza primele 100 de firme din acel cod, sortate
+  descrescator dupa cifra_de_afaceri_neta, cu identitatea firmei + indicatorii financiari.
 
-Datele L2 sunt Parquet (nu CSV) si sunt citite via DuckDB: filtrarea pe judet
-se face direct in fisier (predicate pushdown), fara sa incarcam tabelul intreg
-in memorie la fiecare selectie - relevant pentru un deploy cu resurse limitate
-(Streamlit Cloud/Replit).
+Navigarea foloseste un `st.sidebar.radio` in loc de `st.tabs()`: `st.tabs()` e un widget
+pur client-side care nu expune in Python care tab e activ, deci nu exista cum sa aratam
+doar dropdown-ul relevant in sidebar daca navigarea ramane pe `st.tabs()`. Radio-ul rezolva
+asta - controleaza simultan continutul principal si care dropdown apare in sidebar.
+
+Datele L2 sunt Parquet (nu CSV) si sunt citite via DuckDB: filtrarea (pe judet sau pe cod
+CAEN) se face direct in fisier (predicate pushdown), fara sa incarcam tabelul intreg in
+memorie la fiecare selectie - relevant pentru un deploy cu resurse limitate (Streamlit
+Cloud/Replit).
 
 Datele citite aici sunt doar subsetul mic necesar acestui dashboard (bl_bs_sl_l2.parquet
 + N_CAEN.csv, ~7MB), copiat in `data/` (langa acest script) si tinut in git - nu intregul
@@ -43,6 +53,13 @@ BL_BS_SL_PARQUET = DATA_DIR / "bl_bs_sl_l2.parquet"
 N_CAEN_CSV = DATA_DIR / "N_CAEN.csv"
 
 TOATA_TARA = "Toata tara"
+
+COLOANE_TOP_FIRME = [
+    "DENUMIRE", "cifra_de_afaceri_neta", "profitul_net", "numar_mediu_de_salariati", "datorii",
+    "ADR_JUDET", "profitul_brut", "pierdere_bruta", "pierdere_neta", "venituri_totale",
+    "cheltuieli_totale", "DATA_INMATRICULARE", "FORMA_JURIDICA", "ADR_LOCALITATE",
+    "creante", "TARA_FIRMA_MAMA",
+]
 
 # cateva coduri CAEN din sursa lipsesc zero-ul de inceput (ex. "154" in loc de "0154")
 _SELECT_CU_COD_CAEN = f"""
@@ -84,6 +101,35 @@ def incarca_denumiri_caen() -> pd.Series:
     )
 
 
+@st.cache_data
+def incarca_top_50_caen() -> pd.DataFrame:
+    """Top 50 coduri CAEN dupa numarul de firme (acelasi calcul ca in analytics-1-firme-rom.ipynb)."""
+    query = f"""
+        SELECT cod_caen, COUNT(*) AS numar_firme
+        FROM ({_SELECT_CU_COD_CAEN})
+        GROUP BY cod_caen
+        ORDER BY numar_firme DESC
+        LIMIT 50
+    """
+    df = duckdb.sql(query).df()
+    df["denumire_activitate"] = df["cod_caen"].map(incarca_denumiri_caen()).fillna("denumire necunoscuta")
+    return df
+
+
+@st.cache_data
+def incarca_top_companii_caen(cod_caen: str) -> pd.DataFrame:
+    """Primele 100 de firme pentru un cod CAEN, sortate descrescator dupa cifra_de_afaceri_neta -
+    filtrare si sortare facute direct in DuckDB/Parquet (predicate pushdown), nu in pandas."""
+    query = f"""
+        SELECT {", ".join(COLOANE_TOP_FIRME)}
+        FROM ({_SELECT_CU_COD_CAEN})
+        WHERE cod_caen = ?
+        ORDER BY cifra_de_afaceri_neta DESC
+        LIMIT 100
+    """
+    return duckdb.execute(query, [cod_caen]).df()
+
+
 def histograma_log10(ax, valori: pd.Series, titlu: str, eticheta_x: str, culoare: str) -> None:
     valori_pozitive = valori[valori > 0]
     excluse = len(valori) - len(valori_pozitive)
@@ -94,72 +140,99 @@ def histograma_log10(ax, valori: pd.Series, titlu: str, eticheta_x: str, culoare
     ax.grid(True, alpha=0.3)
 
 
+NUME_TAB_JUDET = "Analiza pe judet"
+NUME_TAB_CAEN = "Analiza pe CAEN - baza"
+
 st.set_page_config(page_title="Firme din Romania - bl_bs_sl", layout="wide")
 st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
 
 denumiri_caen = incarca_denumiri_caen()
+top_50_caen = incarca_top_50_caen()
 
-judete = [TOATA_TARA] + incarca_judete()
-scop_selectat = st.sidebar.selectbox("Alege scopul", judete)
+tab_selectat = st.sidebar.radio("Alege analiza", [NUME_TAB_JUDET, NUME_TAB_CAEN])
+st.sidebar.divider()
 
-df_scop = incarca_scop(None if scop_selectat == TOATA_TARA else scop_selectat)
+st.header(tab_selectat)
 
-st.subheader(f"{scop_selectat} — {len(df_scop)} firme")
+if tab_selectat == NUME_TAB_JUDET:
+    judete = [TOATA_TARA] + incarca_judete()
+    scop_selectat = st.sidebar.selectbox("Alege scopul", judete)
 
-if df_scop.empty:
-    st.warning("Nicio firma pentru selectia curenta.")
+    df_scop = incarca_scop(None if scop_selectat == TOATA_TARA else scop_selectat)
+
+    st.subheader(f"{scop_selectat} — {len(df_scop)} firme")
+
+    if df_scop.empty:
+        st.warning("Nicio firma pentru selectia curenta.")
+    else:
+        top_10_caen = (
+            df_scop["cod_caen"]
+            .value_counts()
+            .head(10)
+            .rename_axis("cod_caen")
+            .reset_index(name="numar_firme")
+        )
+        top_10_caen["denumire_activitate"] = top_10_caen["cod_caen"].map(denumiri_caen)
+
+        coloana_stanga, coloana_dreapta = st.columns(2)
+
+        with coloana_stanga:
+            fig, ax = plt.subplots(figsize=(5.5, 4))
+            histograma_log10(
+                ax, df_scop["cifra_de_afaceri_neta"],
+                "Cifra de afaceri neta (log10)", "log10(cifra_de_afaceri_neta)", "steelblue",
+            )
+            st.pyplot(fig)
+
+        with coloana_dreapta:
+            fig, ax = plt.subplots(figsize=(5.5, 4))
+            histograma_log10(
+                ax, df_scop["numar_mediu_de_salariati"],
+                "Numar mediu de salariati (log10)", "log10(numar_mediu_de_salariati)", "darkorange",
+            )
+            st.pyplot(fig)
+
+        coloana_stanga2, coloana_dreapta2 = st.columns(2)
+
+        with coloana_stanga2:
+            fig, ax = plt.subplots(figsize=(5.5, 4))
+            afisare = top_10_caen.sort_values("numar_firme")
+            ax.barh(afisare["cod_caen"], afisare["numar_firme"], color="seagreen")
+            ax.set_title("Top 10 coduri CAEN", fontsize=10)
+            ax.set_xlabel("numar firme")
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
+
+        with coloana_dreapta2:
+            fig, ax = plt.subplots(figsize=(5.5, 4))
+            subset = df_scop[(df_scop["cifra_de_afaceri_neta"] > 0) & (df_scop["numar_mediu_de_salariati"] > 0)]
+            ax.scatter(
+                np.log10(subset["numar_mediu_de_salariati"]),
+                np.log10(subset["cifra_de_afaceri_neta"]),
+                s=6, alpha=0.3, color="teal",
+            )
+            ax.set_title("Cifra de afaceri vs. nr. salariati (log-log)", fontsize=10)
+            ax.set_xlabel("log10(numar_mediu_de_salariati)")
+            ax.set_ylabel("log10(cifra_de_afaceri_neta)")
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
+
+        st.subheader("Top 10 coduri CAEN - detaliu")
+        st.dataframe(top_10_caen, hide_index=True)
+
 else:
-    top_10_caen = (
-        df_scop["cod_caen"]
-        .value_counts()
-        .head(10)
-        .rename_axis("cod_caen")
-        .reset_index(name="numar_firme")
-    )
-    top_10_caen["denumire_activitate"] = top_10_caen["cod_caen"].map(denumiri_caen)
+    optiuni_caen = {
+        f"{rand['cod_caen']} — {rand['denumire_activitate']} ({rand['numar_firme']} firme)": rand["cod_caen"]
+        for _, rand in top_50_caen.iterrows()
+    }
+    eticheta_caen_selectata = st.sidebar.selectbox("Alege codul CAEN", list(optiuni_caen.keys()))
+    cod_caen_selectat = optiuni_caen[eticheta_caen_selectata]
 
-    coloana_stanga, coloana_dreapta = st.columns(2)
+    denumire_selectata = top_50_caen.loc[
+        top_50_caen["cod_caen"] == cod_caen_selectat, "denumire_activitate"
+    ].iloc[0]
+    df_top_companii = incarca_top_companii_caen(cod_caen_selectat)
 
-    with coloana_stanga:
-        fig, ax = plt.subplots(figsize=(5.5, 4))
-        histograma_log10(
-            ax, df_scop["cifra_de_afaceri_neta"],
-            "Cifra de afaceri neta (log10)", "log10(cifra_de_afaceri_neta)", "steelblue",
-        )
-        st.pyplot(fig)
-
-    with coloana_dreapta:
-        fig, ax = plt.subplots(figsize=(5.5, 4))
-        histograma_log10(
-            ax, df_scop["numar_mediu_de_salariati"],
-            "Numar mediu de salariati (log10)", "log10(numar_mediu_de_salariati)", "darkorange",
-        )
-        st.pyplot(fig)
-
-    coloana_stanga2, coloana_dreapta2 = st.columns(2)
-
-    with coloana_stanga2:
-        fig, ax = plt.subplots(figsize=(5.5, 4))
-        afisare = top_10_caen.sort_values("numar_firme")
-        ax.barh(afisare["cod_caen"], afisare["numar_firme"], color="seagreen")
-        ax.set_title("Top 10 coduri CAEN", fontsize=10)
-        ax.set_xlabel("numar firme")
-        ax.grid(True, alpha=0.3)
-        st.pyplot(fig)
-
-    with coloana_dreapta2:
-        fig, ax = plt.subplots(figsize=(5.5, 4))
-        subset = df_scop[(df_scop["cifra_de_afaceri_neta"] > 0) & (df_scop["numar_mediu_de_salariati"] > 0)]
-        ax.scatter(
-            np.log10(subset["numar_mediu_de_salariati"]),
-            np.log10(subset["cifra_de_afaceri_neta"]),
-            s=6, alpha=0.3, color="teal",
-        )
-        ax.set_title("Cifra de afaceri vs. nr. salariati (log-log)", fontsize=10)
-        ax.set_xlabel("log10(numar_mediu_de_salariati)")
-        ax.set_ylabel("log10(cifra_de_afaceri_neta)")
-        ax.grid(True, alpha=0.3)
-        st.pyplot(fig)
-
-    st.subheader("Top 10 coduri CAEN - detaliu")
-    st.dataframe(top_10_caen, hide_index=True)
+    st.subheader(f"CAEN {cod_caen_selectat} — {denumire_selectata}")
+    st.caption(f"Top {len(df_top_companii)} firme dupa cifra de afaceri neta")
+    st.dataframe(df_top_companii, hide_index=True)
