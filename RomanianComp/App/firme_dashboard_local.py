@@ -11,7 +11,7 @@ aplicatiei deployate ramane neschimbat, fiindca Cloud citeste tot `firme_dashboa
 Ruleaza cu:
     streamlit run firme_dashboard_local.py
 
-Doua tab-uri clasice, orizontal sus pe pagina principala (`st.tabs()`); fiecare tab isi are
+Trei tab-uri clasice, orizontal sus pe pagina principala (`st.tabs()`); fiecare tab isi are
 propriul selector chiar sub titlul tab-ului, nu in sidebar:
 - "Analiza pe judet": (ca in firme_dashboard.py) utilizatorul alege intreaga tara sau un
   judet; interfata afiseaza 4 grafice (histograma cifrei de afaceri, histograma
@@ -21,24 +21,30 @@ propriul selector chiar sub titlul tab-ului, nu in sidebar:
   "Top 100 firme per cod CAEN"). Utilizatorul alege un cod CAEN (din top 50
   dupa numarul de firme); tabelul afiseaza primele 100 de firme din acel cod, sortate
   descrescator dupa cifra_de_afaceri_neta, cu identitatea firmei + indicatorii financiari.
+- "Campionii Cresterii — 2021–2025": firmele bl_bs_sl prezente in ambii ani. Trei sectiuni,
+  fiecare cu un Top 10 (tabel + bar chart orizontal, sortate descrescator): (1) crestere
+  absoluta a cifrei de afaceri, (2) CAGR cifra de afaceri pe 4 ani (doar firme cu Revenue
+  2021 >= 10.000.000 RON si cifra de afaceri pozitiva in ambii ani), (3) crestere absoluta
+  a profitului net. Sursa: crestere_2021_2025_l2.parquet.
 
 Datele L2 sunt Parquet (nu CSV) si sunt citite via DuckDB: filtrarea (pe judet sau pe cod
 CAEN) se face direct in fisier (predicate pushdown), fara sa incarcam tabelul intreg in
 memorie la fiecare selectie - relevant pentru un deploy cu resurse limitate (Streamlit
 Cloud/Replit).
 
-Datele citite aici sunt doar subsetul mic necesar acestui dashboard (bl_bs_sl_l2.parquet
-+ N_CAEN.csv, ~7MB), copiat in `data/` (langa acest script) si tinut in git - nu intregul
-lac de date de la `data.gov.ro/l2_data/` (vezi data-download-firme-rom.ipynb), care ramane
-local, in afara repo-ului. Cand rulezi din nou notebook-ul de download si vrei ca acest
-dashboard sa reflecte datele noi, recopiaza cele 2 fisiere din `data.gov.ro/l2_data/` si
-`data.gov.ro/ref_data/` peste cele din `data/`.
+Datele citite aici sunt doar subsetul mic necesar acestui dashboard (bl_bs_sl_l2.parquet +
+crestere_2021_2025_l2.parquet + N_CAEN.csv, ~9MB), copiat in `data/` (langa acest script) si
+tinut in git - nu intregul lac de date de la `data.gov.ro/l2_data/` (vezi
+data-download-firme-rom.ipynb), care ramane local, in afara repo-ului. Cand rulezi din nou
+notebook-ul de download si vrei ca acest dashboard sa reflecte datele noi, recopiaza
+fisierele din `data.gov.ro/l2_data/` si `data.gov.ro/ref_data/` peste cele din `data/`.
 """
 
 from pathlib import Path
 
 import duckdb
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -46,9 +52,13 @@ import streamlit as st
 DATA_DIR = Path(__file__).parent / "data"
 
 BL_BS_SL_PARQUET = DATA_DIR / "bl_bs_sl_l2.parquet"
+CRESTERE_PARQUET = DATA_DIR / "crestere_2021_2025_l2.parquet"
 N_CAEN_CSV = DATA_DIR / "N_CAEN.csv"
 
 TOATA_TARA = "Toata tara"
+
+# Anii comparati in tab-ul "Campionii Cresterii" (vezi crestere_<start>_<end>_l2 in data-download-firme-rom.ipynb).
+CRESTERE_AN_START, CRESTERE_AN_END = 2021, 2025
 
 COLOANE_TOP_FIRME = [
     "DENUMIRE", "cifra_de_afaceri_neta", "profitul_net", "numar_mediu_de_salariati", "datorii",
@@ -136,8 +146,72 @@ def histograma_log10(ax, valori: pd.Series, titlu: str, eticheta_x: str, culoare
     ax.grid(True, alpha=0.3)
 
 
+def formateaza_ron(valoare) -> str:
+    """RON compact: '1.18 mld RON', '647.3 mil RON', '850 mii RON', '-1 200 RON'."""
+    if valoare is None or pd.isna(valoare):
+        return "—"
+    semn = "-" if valoare < 0 else ""
+    x = abs(float(valoare))
+    if x >= 1e9:
+        return f"{semn}{x / 1e9:.2f} mld RON"
+    if x >= 1e6:
+        return f"{semn}{x / 1e6:.1f} mil RON"
+    if x >= 1e3:
+        return f"{semn}{x / 1e3:,.0f} mii RON".replace(",", " ")
+    return f"{semn}{x:,.0f} RON".replace(",", " ")
+
+
+def formateaza_procent(valoare) -> str:
+    """Procent cu un zecimal: 0.4231 -> '42.3%'."""
+    if valoare is None or pd.isna(valoare):
+        return "—"
+    return f"{valoare * 100:.1f}%"
+
+
+def _ron_axa(x, _pozitie) -> str:
+    semn = "-" if x < 0 else ""
+    x = abs(x)
+    if x >= 1e9:
+        return f"{semn}{x / 1e9:.0f} mld"
+    if x >= 1e6:
+        return f"{semn}{x / 1e6:.0f} mil"
+    if x >= 1e3:
+        return f"{semn}{x / 1e3:.0f} mii"
+    return f"{semn}{x:.0f}"
+
+
+def _scurt(nume: str, maxim: int = 34) -> str:
+    nume = str(nume)
+    return nume if len(nume) <= maxim else nume[: maxim - 1] + "…"
+
+
+def bar_chart_orizontal(nume: pd.Series, valori: pd.Series, eticheta_x: str, culoare: str, formator_axa) -> None:
+    """Bar chart orizontal cu top-ul sortat descrescator (cea mai mare valoare sus)."""
+    ordine = np.argsort(valori.to_numpy())  # crescator -> cea mai mare bara ajunge in varf
+    pozitii = np.arange(len(valori))
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.barh(pozitii, valori.to_numpy()[ordine], color=culoare)
+    ax.set_yticks(pozitii)
+    ax.set_yticklabels([_scurt(n) for n in nume.to_numpy()[ordine]], fontsize=8)
+    ax.set_xlabel(eticheta_x)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(formator_axa))
+    ax.grid(True, alpha=0.3, axis="x")
+    fig.tight_layout()
+    st.pyplot(fig)
+
+
+@st.cache_data
+def incarca_crestere() -> pd.DataFrame:
+    """Firmele bl_bs_sl prezente in ambii ani comparati, cu cifra de afaceri neta si profitul net
+    pentru fiecare an + identitatea firmei (vezi crestere_<start>_<end>_l2 in notebook-ul de download)."""
+    df = duckdb.sql(f"SELECT * FROM '{CRESTERE_PARQUET.as_posix()}'").df()
+    df["DENUMIRE"] = df["DENUMIRE"].fillna("CUI " + df["cui"].astype(str))
+    return df
+
+
 NUME_TAB_JUDET = "Analiza pe judet"
 NUME_TAB_CAEN = "Analiza pe CAEN - baza"
+NUME_TAB_CRESTERE = f"Campionii Cresterii — {CRESTERE_AN_START}–{CRESTERE_AN_END}"
 
 st.set_page_config(page_title="Firme din Romania - bl_bs_sl", layout="wide")
 st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
@@ -145,7 +219,7 @@ st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
 denumiri_caen = incarca_denumiri_caen()
 top_50_caen = incarca_top_50_caen()
 
-tab_judet, tab_caen = st.tabs([NUME_TAB_JUDET, NUME_TAB_CAEN])
+tab_judet, tab_caen, tab_crestere = st.tabs([NUME_TAB_JUDET, NUME_TAB_CAEN, NUME_TAB_CRESTERE])
 
 with tab_judet:
     st.header(NUME_TAB_JUDET)
@@ -231,3 +305,94 @@ with tab_caen:
     st.subheader(f"CAEN {cod_caen_selectat} — {denumire_selectata}")
     st.caption(f"Top {len(df_top_companii)} firme dupa cifra de afaceri neta")
     st.dataframe(df_top_companii, hide_index=True)
+
+with tab_crestere:
+    st.header(NUME_TAB_CRESTERE)
+
+    df_cr = incarca_crestere()
+    col_rev_start = f"cifra_de_afaceri_neta_{CRESTERE_AN_START}"
+    col_rev_end = f"cifra_de_afaceri_neta_{CRESTERE_AN_END}"
+    col_pn_start = f"profitul_net_{CRESTERE_AN_START}"
+    col_pn_end = f"profitul_net_{CRESTERE_AN_END}"
+
+    st.caption(
+        f"{len(df_cr):,}".replace(",", " ")
+        + f" firme care au depus situatii financiare bl_bs_sl in ambii ani "
+        f"({CRESTERE_AN_START} si {CRESTERE_AN_END}). Fiecare sectiune: Top 10, tabel + bar chart orizontal, "
+        f"sortate descrescator."
+    )
+
+    # ---- 1. Absolute Revenue Growth ----
+    st.subheader("1. Absolute Revenue Growth")
+    st.caption(f"revenue_growth = cifra_de_afaceri_neta_{CRESTERE_AN_END} − cifra_de_afaceri_neta_{CRESTERE_AN_START}")
+
+    d1 = (
+        df_cr.assign(crestere=df_cr[col_rev_end] - df_cr[col_rev_start])
+        .nlargest(10, "crestere")
+        .reset_index(drop=True)
+    )
+    st.dataframe(
+        pd.DataFrame({
+            "Rank": np.arange(1, len(d1) + 1),
+            "Company": d1["DENUMIRE"],
+            f"Revenue {CRESTERE_AN_START}": d1[col_rev_start].map(formateaza_ron),
+            f"Revenue {CRESTERE_AN_END}": d1[col_rev_end].map(formateaza_ron),
+            "Increase (RON)": d1["crestere"].map(formateaza_ron),
+        }),
+        hide_index=True,
+    )
+    bar_chart_orizontal(
+        d1["DENUMIRE"], d1["crestere"], "crestere cifra de afaceri (RON)", "seagreen", _ron_axa
+    )
+
+    # ---- 2. Revenue CAGR ----
+    st.subheader("2. Revenue CAGR")
+    st.caption(
+        f"CAGR = (Revenue_{CRESTERE_AN_END} / Revenue_{CRESTERE_AN_START})^(1/4) − 1 · doar firme cu "
+        f"cifra de afaceri pozitiva in ambii ani si Revenue {CRESTERE_AN_START} ≥ 10.000.000 RON"
+    )
+
+    eligibile = df_cr[
+        (df_cr[col_rev_start] > 0)
+        & (df_cr[col_rev_end] > 0)
+        & (df_cr[col_rev_start] >= 10_000_000)
+    ].copy()
+    eligibile["cagr"] = (eligibile[col_rev_end] / eligibile[col_rev_start]) ** (1 / 4) - 1
+    d2 = eligibile.nlargest(10, "cagr").reset_index(drop=True)
+
+    st.dataframe(
+        pd.DataFrame({
+            "Rank": np.arange(1, len(d2) + 1),
+            "Company": d2["DENUMIRE"],
+            f"Revenue {CRESTERE_AN_START}": d2[col_rev_start].map(formateaza_ron),
+            f"Revenue {CRESTERE_AN_END}": d2[col_rev_end].map(formateaza_ron),
+            "CAGR %": d2["cagr"].map(formateaza_procent),
+        }),
+        hide_index=True,
+    )
+    bar_chart_orizontal(
+        d2["DENUMIRE"], d2["cagr"], "CAGR", "steelblue", lambda x, _p: f"{x * 100:.0f}%"
+    )
+
+    # ---- 3. Absolute Net Profit Growth ----
+    st.subheader("3. Absolute Net Profit Growth")
+    st.caption(f"profit_growth = profitul_net_{CRESTERE_AN_END} − profitul_net_{CRESTERE_AN_START}")
+
+    d3 = (
+        df_cr.assign(crestere=df_cr[col_pn_end] - df_cr[col_pn_start])
+        .nlargest(10, "crestere")
+        .reset_index(drop=True)
+    )
+    st.dataframe(
+        pd.DataFrame({
+            "Rank": np.arange(1, len(d3) + 1),
+            "Company": d3["DENUMIRE"],
+            f"Net Profit {CRESTERE_AN_START}": d3[col_pn_start].map(formateaza_ron),
+            f"Net Profit {CRESTERE_AN_END}": d3[col_pn_end].map(formateaza_ron),
+            "Increase (RON)": d3["crestere"].map(formateaza_ron),
+        }),
+        hide_index=True,
+    )
+    bar_chart_orizontal(
+        d3["DENUMIRE"], d3["crestere"], "crestere profit net (RON)", "indianred", _ron_axa
+    )
