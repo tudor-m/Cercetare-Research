@@ -30,7 +30,7 @@ propriul selector chiar sub titlul tab-ului, nu in sidebar:
   diviziunile cu cifra de afaceri agregata >= PRAG_MINIM_CIFRA_SECTOR in 2021.
 - "Harta Cresterii — 2021–2025": aceleasi firme, agregate pe judet (ADR_JUDET). Aceleasi trei
   sectiuni (crestere absoluta cifra de afaceri, CAGR, crestere absoluta profit net), fiecare
-  cu Top 10 (tabel + bar chart) si o harta choropleth Altair a tuturor celor 42 de judete
+  cu Top 10 (tabel + bar chart) si o harta choropleth Plotly a tuturor celor 42 de judete
   (tooltip: judet + valoare). Conturul judetelor: `judete_ro.geojson` (GADM, NAME_1).
 
 Datele L2 sunt Parquet (nu CSV) si sunt citite via DuckDB: filtrarea (pe judet sau pe cod
@@ -50,12 +50,12 @@ import json
 import unicodedata
 from pathlib import Path
 
-import altair as alt
 import duckdb
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -322,61 +322,60 @@ def _cheie_judet(nume: str) -> str:
 
 
 @st.cache_data
-def _geojson_judete_features() -> list[dict]:
-    """Cele 42 de forme ale judetelor Romaniei (GeoJSON, GADM; proprietatea NAME_1 = numele judetului)."""
+def _geojson_judete() -> dict:
+    """GeoJSON cu cele 42 de forme ale judetelor Romaniei (GADM; proprietatea NAME_1 = numele judetului)."""
     with open(GEOJSON_JUDETE, encoding="utf-8") as f:
-        return json.load(f)["features"]
+        return json.load(f)
+
+
+@st.cache_data
+def _cheie_la_nume_geo() -> dict[str, str]:
+    """cheie normalizata (_cheie_judet) -> NAME_1 exact din GeoJSON, pentru join-ul choropleth."""
+    return {
+        _cheie_judet(forma["properties"]["NAME_1"]): forma["properties"]["NAME_1"]
+        for forma in _geojson_judete()["features"]
+    }
 
 
 def harta_judete(
-    df_valori: pd.DataFrame, coloana: str, titlu_legenda: str, scala: alt.Scale, formator_text,
-    format_legenda: str = "~s",
+    df_valori: pd.DataFrame, coloana: str, titlu_legenda: str, scala_culori: str, formator_text,
+    format_legenda: str = "~s", divergent: bool = False,
 ) -> None:
-    """Choropleth Altair peste TOATE cele 42 de judete, colorat dupa `coloana`.
+    """Choropleth Plotly peste TOATE cele 42 de judete, colorat dupa `coloana`.
     `df_valori` are 'cheie_judet' (cheia de join), 'judet' (numele afisat) si `coloana` (valoarea numerica).
-    Tooltip: numele judetului + valoarea formatata. Judetele fara date raman gri (valoare lipsa).
-    `format_legenda` e un format d3 pentru etichetele legendei (ex. '~s' pentru RON, '.0%' pentru procente)."""
-    valoare_pe_cheie = df_valori.set_index("cheie_judet")[coloana].to_dict()
-    nume_pe_cheie = df_valori.set_index("cheie_judet")["judet"].to_dict()
+    Tooltip: numele judetului + valoarea formatata. Scala de culori se satureaza la percentila 90
+    (Bucuresti domiciliaza firme cu cifre mult peste restul - fara clip, restul hartii ar fi uniforma).
+    `format_legenda` = format d3 pentru colorbar ('~s' RON -> '206G', '.0%' procente -> '14%')."""
+    d = df_valori.dropna(subset=[coloana]).copy()
+    d["_nume_geo"] = d["cheie_judet"].map(_cheie_la_nume_geo())
+    d = d[d["_nume_geo"].notna()]
+    valori = d[coloana].astype(float)
 
-    features = []
-    for forma in _geojson_judete_features():
-        cheie = _cheie_judet(forma["properties"]["NAME_1"])
-        valoare = valoare_pe_cheie.get(cheie)
-        features.append({
-            "type": "Feature",
-            "geometry": forma["geometry"],
-            "properties": {
-                "judet": nume_pe_cheie.get(cheie, forma["properties"]["NAME_1"]),
-                "valoare": None if valoare is None else float(valoare),
-                "eticheta": "fara date" if valoare is None else formator_text(valoare),
-            },
-        })
+    if divergent:
+        limita = valori.abs().quantile(0.90) or float(valori.abs().max() or 1)
+        zmin, zmax, zmid = -limita, limita, 0
+    else:
+        zmin = min(0.0, float(valori.min()))
+        zmax = float(valori.quantile(0.90) or valori.max() or 1)
+        zmid = None
 
-    # Colectie de forme (nu doar o lista) + numeric width/height: proiectia geografica se
-    # potriveste corect doar cu dimensiuni concrete - `width="container"` lasa harta goala
-    # in coloane inguste / tab-uri inactive (bug cunoscut Streamlit + Vega-Lite geoshape).
-    colectie = {"type": "FeatureCollection", "features": features}
-    chart = (
-        alt.Chart(alt.Data(values=colectie, format=alt.DataFormat(property="features", type="json")))
-        .mark_geoshape(stroke="white", strokeWidth=0.4)
-        .encode(
-            color=alt.Color(
-                "properties.valoare:Q",
-                scale=scala,
-                legend=alt.Legend(
-                    title=titlu_legenda, orient="bottom", gradientLength=180, format=format_legenda
-                ),
-            ),
-            tooltip=[
-                alt.Tooltip("properties.judet:N", title="Judet"),
-                alt.Tooltip("properties.eticheta:N", title=titlu_legenda),
-            ],
-        )
-        .project("mercator")
-        .properties(width=440, height=340)
-    )
-    st.altair_chart(chart, width="stretch")
+    fig = go.Figure(go.Choropleth(
+        geojson=_geojson_judete(),
+        featureidkey="properties.NAME_1",
+        locations=d["_nume_geo"],
+        z=valori,
+        zmin=zmin, zmax=zmax, zmid=zmid,
+        colorscale=scala_culori,
+        marker_line_color="white",
+        marker_line_width=0.5,
+        customdata=np.stack([d["judet"].to_numpy(), valori.map(formator_text).to_numpy()], axis=-1),
+        hovertemplate="<b>%{customdata[0]}</b><br>" + titlu_legenda + ": %{customdata[1]}<extra></extra>",
+        colorbar=dict(title=dict(text=titlu_legenda, side="right"), thickness=12, len=0.9,
+                      tickformat=format_legenda, outlinewidth=0),
+    ))
+    fig.update_geos(fitbounds="locations", visible=False, projection_type="mercator")
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=360, dragmode=False)
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
 @st.cache_data
@@ -725,10 +724,7 @@ with tab_harta:
             "seagreen", _ron_axa, figsize=(5, 4.5),
         )
     with col_harta:
-        harta_judete(
-            h1, "crestere", "Crestere cifra de afaceri (RON)",
-            alt.Scale(scheme="greens", type="symlog"), formateaza_ron,
-        )
+        harta_judete(h1, "crestere", "Crestere cifra de afaceri (RON)", "Greens", formateaza_ron)
 
     # ---- 2. Revenue CAGR by County ----
     st.subheader("2. Revenue CAGR by County")
@@ -758,8 +754,7 @@ with tab_harta:
         )
     with col_harta:
         harta_judete(
-            h2, "cagr", "CAGR cifra de afaceri", alt.Scale(scheme="blues"), formateaza_procent,
-            format_legenda=".0%",
+            h2, "cagr", "CAGR cifra de afaceri", "Blues", formateaza_procent, format_legenda=".0%"
         )
 
     # ---- 3. Absolute Net Profit Growth by County ----
@@ -786,6 +781,5 @@ with tab_harta:
         )
     with col_harta:
         harta_judete(
-            h3, "crestere", "Crestere profit net (RON)",
-            alt.Scale(scheme="redyellowgreen", domainMid=0), formateaza_ron,
+            h3, "crestere", "Crestere profit net (RON)", "RdYlGn", formateaza_ron, divergent=True
         )

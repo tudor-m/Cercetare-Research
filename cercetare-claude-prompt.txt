@@ -209,3 +209,17 @@ Fix (both dashboards): give the map concrete dimensions - .properties(width=440,
 To actually see it the user must rerun/restart their local `streamlit run firme_dashboard_local.py` (a process was already running from before these edits) with altair installed (pip install -r requirements.txt). On Streamlit Cloud it needs the push - requirements.txt now lists altair so the rebuild will install it. Not committed (the width="container" version was committed as 4eede2f).
 
 ----------------------------------------
+
+Q: i still don't see the maps. Not in notebooks nor on streamlit
+
+A: Real root cause found (my earlier width="container" theory was only a secondary issue). Pulled the exact vega-lite spec Streamlit was sending to the browser via AppTest: it had NO data at all ("data": []). Streamlit's st.altair_chart / st.vega_lite_chart force-converts any inline chart data to Arrow IPC bytes (_marshall_chart_data in streamlit/elements/vega_charts.py strips spec["data"]["values"] and runs convert_anything_to_arrow_bytes). A GeoJSON FeatureCollection - especially with a mix of Polygon and MultiPolygon geometries, which Romania's counties have - does not survive that conversion, so the geometry was silently dropped and the map rendered empty. This is a hard Streamlit+Altair limitation for inline geo data, not a fixable spec detail.
+
+Fix: switched the choropleth from Altair to Plotly (go.Choropleth). Streamlit's st.plotly_chart passes the figure JSON through verbatim (no Arrow), so the embedded geojson reaches plotly.js intact - verified via AppTest that the spec now carries all 42 county shapes + 42 locations + z values. requirements.txt: altair -> plotly (plotly 6.3.0 is already in the local anaconda env). harta_judete() rewritten: builds go.Choropleth(geojson=..., featureidkey="properties.NAME_1", locations=<GADM names>, z=<values>), joins via the same _cheie_judet normalization (now cached as _cheie_la_nume_geo), hovertemplate = county + pre-formatted value, colorbar as the legend with d3 tickformat (~s / .0%). Color range saturates at the 90th percentile (Bucuresti's ~206 mld would otherwise wash out the other 41 counties on a linear scale); section 3 uses a symmetric divergent range around 0 (RdYlGn) since 10 counties have negative net-profit growth. Rendered all 3 server-side with kaleido to confirm: Romania, all 42 counties distinctly colored, colorbar + hover.
+
+Still needs: restart the running `streamlit run firme_dashboard_local.py` (there's a stale process from before these edits; a changed top-level import doesn't hot-reload reliably). Nothing to install locally. For Streamlit Cloud: push - requirements.txt now pulls plotly.
+
+Note on "not in notebooks": the maps were only ever the Streamlit "Harta Cresterii" tab - there is no map cell in the analytics notebook. The notebook cell added for this feature only downloads the county GeoJSON.
+
+Not committed.
+
+----------------------------------------
