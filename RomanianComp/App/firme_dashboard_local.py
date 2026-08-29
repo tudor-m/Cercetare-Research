@@ -331,11 +331,13 @@ def _geojson_judete_features() -> list[dict]:
 
 
 def harta_judete(
-    df_valori: pd.DataFrame, coloana: str, titlu_legenda: str, scala: alt.Scale, formator_text
+    df_valori: pd.DataFrame, coloana: str, titlu_legenda: str, scala: alt.Scale, formator_text,
+    format_legenda: str = "~s",
 ) -> None:
     """Choropleth Altair peste TOATE cele 42 de judete, colorat dupa `coloana`.
     `df_valori` are 'cheie_judet' (cheia de join), 'judet' (numele afisat) si `coloana` (valoarea numerica).
-    Tooltip: numele judetului + valoarea formatata. Judetele fara date raman gri (valoare lipsa)."""
+    Tooltip: numele judetului + valoarea formatata. Judetele fara date raman gri (valoare lipsa).
+    `format_legenda` e un format d3 pentru etichetele legendei (ex. '~s' pentru RON, '.0%' pentru procente)."""
     valoare_pe_cheie = df_valori.set_index("cheie_judet")[coloana].to_dict()
     nume_pe_cheie = df_valori.set_index("cheie_judet")["judet"].to_dict()
 
@@ -353,14 +355,20 @@ def harta_judete(
             },
         })
 
+    # Colectie de forme (nu doar o lista) + numeric width/height: proiectia geografica se
+    # potriveste corect doar cu dimensiuni concrete - `width="container"` lasa harta goala
+    # in coloane inguste / tab-uri inactive (bug cunoscut Streamlit + Vega-Lite geoshape).
+    colectie = {"type": "FeatureCollection", "features": features}
     chart = (
-        alt.Chart(alt.Data(values=features))
+        alt.Chart(alt.Data(values=colectie, format=alt.DataFormat(property="features", type="json")))
         .mark_geoshape(stroke="white", strokeWidth=0.4)
         .encode(
             color=alt.Color(
                 "properties.valoare:Q",
                 scale=scala,
-                legend=alt.Legend(title=titlu_legenda, orient="bottom", gradientLength=180),
+                legend=alt.Legend(
+                    title=titlu_legenda, orient="bottom", gradientLength=180, format=format_legenda
+                ),
             ),
             tooltip=[
                 alt.Tooltip("properties.judet:N", title="Judet"),
@@ -368,7 +376,7 @@ def harta_judete(
             ],
         )
         .project("mercator")
-        .properties(width="container", height=300)
+        .properties(width=440, height=340)
     )
     st.altair_chart(chart, width="stretch")
 
@@ -751,7 +759,10 @@ with tab_harta:
             lambda x, _p: f"{x * 100:.0f}%", figsize=(5, 4.5),
         )
     with col_harta:
-        harta_judete(h2, "cagr", "CAGR cifra de afaceri", alt.Scale(scheme="blues"), formateaza_procent)
+        harta_judete(
+            h2, "cagr", "CAGR cifra de afaceri", alt.Scale(scheme="blues"), formateaza_procent,
+            format_legenda=".0%",
+        )
 
     # ---- 3. Absolute Net Profit Growth by County ----
     st.subheader("3. Absolute Net Profit Growth by County")

@@ -199,3 +199,13 @@ TAB. Fifth tab "Harta Cresterii — 2021–2025" in both files (bodies identical
 Verified: AppTest on both files - zero exceptions, 5 tabs, 3 county tables with exact spec columns + 10 rows; all 3 Altair map specs validated with real data (42/42 counties matched, symlog/diverging scales compile); headless streamlit server returns HTTP 200 with a clean log. Sanity: revenue growth top counties Bucuresti / Ilfov / Arges / Cluj / Timis; CAGR top Bacau 14.2% / Gorj 13.2% / Botosani 11.9%; net-profit growth top Bucuresti / Cluj / Bacau, with Ialomita / Harghita / Braila negative. Not committed. Changed: notebook, both dashboards, requirements.txt; new file RomanianComp/App/data/judete_ro.geojson.
 
 ----------------------------------------
+
+Q: i don't see the map of romania with counties why?
+
+A: Bug in the choropleth spec: harta_judete() built the Altair chart with .properties(width="container"). Vega-Lite's geographic projection can't compute its fit when the width is "container" and the measured width is 0 at render time - which is exactly the case inside a narrow st.columns cell and/or a tab that isn't the active one (Streamlit renders all tab bodies up front). Result: the map area stays blank while the table and bar chart render fine.
+
+Fix (both dashboards): give the map concrete dimensions - .properties(width=440, height=340) - and pass the data as a proper {"type":"FeatureCollection",...} with format=alt.DataFormat(property="features", type="json") instead of a bare feature list. Also switched section 1's scale to type="symlog" (Bucuresti's ~206 mld dwarfs everything on a linear scale, leaving the other 41 counties indistinguishable) and added compact legend tick formats (~s for RON -> "206G", .0% for CAGR -> "14%"). Verified by rendering all 3 maps server-side with vl-convert: Romania with all 42 counties, colored, legend + tooltip (county + formatted value).
+
+To actually see it the user must rerun/restart their local `streamlit run firme_dashboard_local.py` (a process was already running from before these edits) with altair installed (pip install -r requirements.txt). On Streamlit Cloud it needs the push - requirements.txt now lists altair so the rebuild will install it. Not committed (the width="container" version was committed as 4eede2f).
+
+----------------------------------------
