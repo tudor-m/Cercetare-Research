@@ -9,7 +9,7 @@ sigur ca vrei sa ajunga pe Cloud.
 Ruleaza cu:
     streamlit run firme_dashboard.py
 
-Patru tab-uri clasice, orizontal sus pe pagina principala (`st.tabs()`); fiecare tab isi are
+Cinci tab-uri clasice, orizontal sus pe pagina principala (`st.tabs()`); fiecare tab isi are
 propriul selector chiar sub titlul tab-ului, nu in sidebar:
 - "Analiza pe judet": utilizatorul alege intreaga tara sau un judet; interfata
   afiseaza 4 grafice (histograma cifrei de afaceri, histograma numarului de salariati, bar
@@ -28,6 +28,10 @@ propriul selector chiar sub titlul tab-ului, nu in sidebar:
   cifre (`cod_caen[:2]`, cod CAEN principal al firmei), cu denumiri lizibile de diviziune.
   Aceleasi trei sectiuni ca mai sus, la nivel de sector; la CAGR se pastreaza doar
   diviziunile cu cifra de afaceri agregata >= PRAG_MINIM_CIFRA_SECTOR in 2021.
+- "Harta Cresterii — 2021–2025": aceleasi firme, agregate pe judet (ADR_JUDET). Aceleasi trei
+  sectiuni (crestere absoluta cifra de afaceri, CAGR, crestere absoluta profit net), fiecare
+  cu Top 10 (tabel + bar chart) si o harta choropleth Altair a tuturor celor 42 de judete
+  (tooltip: judet + valoare). Conturul judetelor: `judete_ro.geojson` (GADM, NAME_1).
 
 Datele L2 sunt Parquet (nu CSV) si sunt citite via DuckDB: filtrarea (pe judet sau pe cod
 CAEN) se face direct in fisier (predicate pushdown), fara sa incarcam tabelul intreg in
@@ -35,15 +39,18 @@ memorie la fiecare selectie - relevant pentru un deploy cu resurse limitate (Str
 Cloud/Replit).
 
 Datele citite aici sunt doar subsetul mic necesar acestui dashboard (bl_bs_sl_l2.parquet +
-crestere_2021_2025_l2.parquet + N_CAEN.csv, ~9MB), copiat in `data/` (langa acest script) si
-tinut in git - nu intregul lac de date de la `data.gov.ro/l2_data/` (vezi
-data-download-firme-rom.ipynb), care ramane local, in afara repo-ului. Cand rulezi din nou
-notebook-ul de download si vrei ca acest dashboard sa reflecte datele noi, recopiaza
+crestere_2021_2025_l2.parquet + judete_ro.geojson + N_CAEN.csv, ~9MB), copiat in `data/`
+(langa acest script) si tinut in git - nu intregul lac de date de la `data.gov.ro/l2_data/`
+(vezi data-download-firme-rom.ipynb), care ramane local, in afara repo-ului. Cand rulezi din
+nou notebook-ul de download si vrei ca acest dashboard sa reflecte datele noi, recopiaza
 fisierele din `data.gov.ro/l2_data/` si `data.gov.ro/ref_data/` peste cele din `data/`.
 """
 
+import json
+import unicodedata
 from pathlib import Path
 
+import altair as alt
 import duckdb
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -55,6 +62,7 @@ DATA_DIR = Path(__file__).parent / "data"
 
 BL_BS_SL_PARQUET = DATA_DIR / "bl_bs_sl_l2.parquet"
 CRESTERE_PARQUET = DATA_DIR / "crestere_2021_2025_l2.parquet"
+GEOJSON_JUDETE = DATA_DIR / "judete_ro.geojson"
 N_CAEN_CSV = DATA_DIR / "N_CAEN.csv"
 
 TOATA_TARA = "Toata tara"
@@ -290,12 +298,13 @@ def _scurt(nume: str, maxim: int = 34) -> str:
 
 
 def bar_chart_orizontal(
-    nume: pd.Series, valori: pd.Series, eticheta_x: str, culoare: str, formator_axa, maxim_eticheta: int = 34
+    nume: pd.Series, valori: pd.Series, eticheta_x: str, culoare: str, formator_axa,
+    maxim_eticheta: int = 34, figsize: tuple[float, float] = (9, 4.5),
 ) -> None:
     """Bar chart orizontal cu top-ul sortat descrescator (cea mai mare valoare sus)."""
     ordine = np.argsort(valori.to_numpy())  # crescator -> cea mai mare bara ajunge in varf
     pozitii = np.arange(len(valori))
-    fig, ax = plt.subplots(figsize=(9, 4.5))
+    fig, ax = plt.subplots(figsize=figsize)
     ax.barh(pozitii, valori.to_numpy()[ordine], color=culoare)
     ax.set_yticks(pozitii)
     ax.set_yticklabels([_scurt(n, maxim_eticheta) for n in nume.to_numpy()[ordine]], fontsize=8)
@@ -304,6 +313,62 @@ def bar_chart_orizontal(
     ax.grid(True, alpha=0.3, axis="x")
     fig.tight_layout()
     st.pyplot(fig)
+
+
+def _cheie_judet(nume: str) -> str:
+    """Cheie de potrivire intre ADR_JUDET si numele judetului din GeoJSON (fara diacritice, minuscule)."""
+    fara_diacritice = unicodedata.normalize("NFKD", str(nume)).encode("ascii", "ignore").decode("ascii")
+    return fara_diacritice.lower().replace("-", " ").strip()
+
+
+@st.cache_data
+def _geojson_judete_features() -> list[dict]:
+    """Cele 42 de forme ale judetelor Romaniei (GeoJSON, GADM; proprietatea NAME_1 = numele judetului)."""
+    with open(GEOJSON_JUDETE, encoding="utf-8") as f:
+        return json.load(f)["features"]
+
+
+def harta_judete(
+    df_valori: pd.DataFrame, coloana: str, titlu_legenda: str, scala: alt.Scale, formator_text
+) -> None:
+    """Choropleth Altair peste TOATE cele 42 de judete, colorat dupa `coloana`.
+    `df_valori` are 'cheie_judet' (cheia de join), 'judet' (numele afisat) si `coloana` (valoarea numerica).
+    Tooltip: numele judetului + valoarea formatata. Judetele fara date raman gri (valoare lipsa)."""
+    valoare_pe_cheie = df_valori.set_index("cheie_judet")[coloana].to_dict()
+    nume_pe_cheie = df_valori.set_index("cheie_judet")["judet"].to_dict()
+
+    features = []
+    for forma in _geojson_judete_features():
+        cheie = _cheie_judet(forma["properties"]["NAME_1"])
+        valoare = valoare_pe_cheie.get(cheie)
+        features.append({
+            "type": "Feature",
+            "geometry": forma["geometry"],
+            "properties": {
+                "judet": nume_pe_cheie.get(cheie, forma["properties"]["NAME_1"]),
+                "valoare": None if valoare is None else float(valoare),
+                "eticheta": "fara date" if valoare is None else formator_text(valoare),
+            },
+        })
+
+    chart = (
+        alt.Chart(alt.Data(values=features))
+        .mark_geoshape(stroke="white", strokeWidth=0.4)
+        .encode(
+            color=alt.Color(
+                "properties.valoare:Q",
+                scale=scala,
+                legend=alt.Legend(title=titlu_legenda, orient="bottom", gradientLength=180),
+            ),
+            tooltip=[
+                alt.Tooltip("properties.judet:N", title="Judet"),
+                alt.Tooltip("properties.eticheta:N", title=titlu_legenda),
+            ],
+        )
+        .project("mercator")
+        .properties(width="container", height=300)
+    )
+    st.altair_chart(chart, width="stretch")
 
 
 @st.cache_data
@@ -320,6 +385,7 @@ NUME_TAB_JUDET = "Analiza pe judet"
 NUME_TAB_CAEN = "Analiza pe CAEN - baza"
 NUME_TAB_CRESTERE = f"Campionii Cresterii — {CRESTERE_AN_START}–{CRESTERE_AN_END}"
 NUME_TAB_SECTOARE = f"Sectoarele in Ascensiune — {CRESTERE_AN_START}–{CRESTERE_AN_END}"
+NUME_TAB_HARTA = f"Harta Cresterii — {CRESTERE_AN_START}–{CRESTERE_AN_END}"
 
 st.set_page_config(page_title="Firme din Romania - bl_bs_sl", layout="wide")
 st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
@@ -327,8 +393,8 @@ st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
 denumiri_caen = incarca_denumiri_caen()
 top_50_caen = incarca_top_50_caen()
 
-tab_judet, tab_caen, tab_crestere, tab_sectoare = st.tabs(
-    [NUME_TAB_JUDET, NUME_TAB_CAEN, NUME_TAB_CRESTERE, NUME_TAB_SECTOARE]
+tab_judet, tab_caen, tab_crestere, tab_sectoare, tab_harta = st.tabs(
+    [NUME_TAB_JUDET, NUME_TAB_CAEN, NUME_TAB_CRESTERE, NUME_TAB_SECTOARE, NUME_TAB_HARTA]
 )
 
 with tab_judet:
@@ -607,3 +673,108 @@ with tab_sectoare:
         s3["Sector"], s3["crestere"], "crestere profit net (RON)", "indianred", _ron_axa,
         maxim_eticheta=52,
     )
+
+with tab_harta:
+    st.header(NUME_TAB_HARTA)
+
+    df_ha = incarca_crestere()
+    df_ha = df_ha[df_ha["ADR_JUDET"].notna()].copy()
+    judete = df_ha.groupby("ADR_JUDET", as_index=False)[
+        [COL_REV_START, COL_REV_END, COL_PN_START, COL_PN_END]
+    ].sum()
+    judete["judet"] = judete["ADR_JUDET"]
+    judete["cheie_judet"] = judete["ADR_JUDET"].map(_cheie_judet)
+
+    st.caption(
+        f"{len(df_ha):,}".replace(",", " ")
+        + f" firme bl_bs_sl (prezente in {CRESTERE_AN_START} si {CRESTERE_AN_END}), agregate pe cele "
+        f"{judete['judet'].nunique()} de judete dupa ADR_JUDET. Fiecare sectiune: Top 10 (tabel + bar chart) "
+        f"si harta tuturor judetelor (treci cu mouse-ul pentru valoare)."
+    )
+
+    RAPORT_COLOANE = [1.2, 1.05, 1.3]
+
+    # ---- 1. Absolute Revenue Growth by County ----
+    st.subheader("1. Absolute Revenue Growth by County")
+    st.caption(f"revenue_growth = total_revenue_{CRESTERE_AN_END} − total_revenue_{CRESTERE_AN_START} (pe judet)")
+    h1 = judete.assign(crestere=judete[COL_REV_END] - judete[COL_REV_START])
+    h1_top = h1.nlargest(10, "crestere").reset_index(drop=True)
+    col_tabel, col_bar, col_harta = st.columns(RAPORT_COLOANE)
+    with col_tabel:
+        st.dataframe(
+            pd.DataFrame({
+                "Rank": np.arange(1, len(h1_top) + 1),
+                "County": h1_top["judet"],
+                f"Revenue {CRESTERE_AN_START}": h1_top[COL_REV_START].map(formateaza_ron),
+                f"Revenue {CRESTERE_AN_END}": h1_top[COL_REV_END].map(formateaza_ron),
+                "Increase (RON)": h1_top["crestere"].map(formateaza_ron),
+            }),
+            hide_index=True,
+        )
+    with col_bar:
+        bar_chart_orizontal(
+            h1_top["judet"], h1_top["crestere"], "crestere cifra de afaceri (RON)",
+            "seagreen", _ron_axa, figsize=(5, 4.5),
+        )
+    with col_harta:
+        harta_judete(
+            h1, "crestere", "Crestere cifra de afaceri (RON)",
+            alt.Scale(scheme="greens", type="symlog"), formateaza_ron,
+        )
+
+    # ---- 2. Revenue CAGR by County ----
+    st.subheader("2. Revenue CAGR by County")
+    st.caption(
+        f"CAGR = (total_revenue_{CRESTERE_AN_END} / total_revenue_{CRESTERE_AN_START})^(1/4) − 1 · "
+        f"doar judete cu cifra de afaceri agregata pozitiva in ambii ani"
+    )
+    h2 = judete[(judete[COL_REV_START] > 0) & (judete[COL_REV_END] > 0)].copy()
+    h2["cagr"] = (h2[COL_REV_END] / h2[COL_REV_START]) ** (1 / 4) - 1
+    h2_top = h2.nlargest(10, "cagr").reset_index(drop=True)
+    col_tabel, col_bar, col_harta = st.columns(RAPORT_COLOANE)
+    with col_tabel:
+        st.dataframe(
+            pd.DataFrame({
+                "Rank": np.arange(1, len(h2_top) + 1),
+                "County": h2_top["judet"],
+                f"Revenue {CRESTERE_AN_START}": h2_top[COL_REV_START].map(formateaza_ron),
+                f"Revenue {CRESTERE_AN_END}": h2_top[COL_REV_END].map(formateaza_ron),
+                "CAGR %": h2_top["cagr"].map(formateaza_procent),
+            }),
+            hide_index=True,
+        )
+    with col_bar:
+        bar_chart_orizontal(
+            h2_top["judet"], h2_top["cagr"], "CAGR", "steelblue",
+            lambda x, _p: f"{x * 100:.0f}%", figsize=(5, 4.5),
+        )
+    with col_harta:
+        harta_judete(h2, "cagr", "CAGR cifra de afaceri", alt.Scale(scheme="blues"), formateaza_procent)
+
+    # ---- 3. Absolute Net Profit Growth by County ----
+    st.subheader("3. Absolute Net Profit Growth by County")
+    st.caption(f"profit_growth = total_net_profit_{CRESTERE_AN_END} − total_net_profit_{CRESTERE_AN_START} (pe judet)")
+    h3 = judete.assign(crestere=judete[COL_PN_END] - judete[COL_PN_START])
+    h3_top = h3.nlargest(10, "crestere").reset_index(drop=True)
+    col_tabel, col_bar, col_harta = st.columns(RAPORT_COLOANE)
+    with col_tabel:
+        st.dataframe(
+            pd.DataFrame({
+                "Rank": np.arange(1, len(h3_top) + 1),
+                "County": h3_top["judet"],
+                f"Net Profit {CRESTERE_AN_START}": h3_top[COL_PN_START].map(formateaza_ron),
+                f"Net Profit {CRESTERE_AN_END}": h3_top[COL_PN_END].map(formateaza_ron),
+                "Increase (RON)": h3_top["crestere"].map(formateaza_ron),
+            }),
+            hide_index=True,
+        )
+    with col_bar:
+        bar_chart_orizontal(
+            h3_top["judet"], h3_top["crestere"], "crestere profit net (RON)",
+            "indianred", _ron_axa, figsize=(5, 4.5),
+        )
+    with col_harta:
+        harta_judete(
+            h3, "crestere", "Crestere profit net (RON)",
+            alt.Scale(scheme="redyellowgreen", domainMid=0), formateaza_ron,
+        )

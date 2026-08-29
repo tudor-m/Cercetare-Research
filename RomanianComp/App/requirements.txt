@@ -3,3 +3,4 @@ pandas
 duckdb
 matplotlib
 numpy
+altair
