@@ -8,6 +8,8 @@ portal.just.ro
 listafirme.ro
 totalfirme.ro
 
+data.gov.ro - foarte bun
+
 Integrarea : pentru coduri caen care sunt trendurile industriei?
 Care este profitabilittaea medie a codului CAEN (judet, tara, etc).
 O companie - 1 cod CAEN

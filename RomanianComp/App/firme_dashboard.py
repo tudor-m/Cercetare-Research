@@ -9,20 +9,16 @@ sigur ca vrei sa ajunga pe Cloud.
 Ruleaza cu:
     streamlit run firme_dashboard.py
 
-Doua "tab-uri" (nu `st.tabs()` - vezi mai jos de ce - ci navigate printr-un radio in sidebar):
-- "Analiza pe judet": utilizatorul alege intreaga tara sau un judet din sidebar; interfata
+Doua tab-uri clasice, orizontal sus pe pagina principala (`st.tabs()`); fiecare tab isi are
+propriul selector chiar sub titlul tab-ului, nu in sidebar:
+- "Analiza pe judet": utilizatorul alege intreaga tara sau un judet; interfata
   afiseaza 4 grafice (histograma cifrei de afaceri, histograma numarului de salariati, bar
   chart cu top 10 coduri CAEN, scatter cifra de afaceri vs. salariati) plus un tabel cu cele
   10 coduri CAEN si denumirea activitatii.
 - "Analiza pe CAEN - baza": replica analizei din analytics-1-firme-rom.ipynb (celula
-  "Top 100 firme per cod CAEN"). Utilizatorul alege din sidebar un cod CAEN (din top 50
+  "Top 100 firme per cod CAEN"). Utilizatorul alege un cod CAEN (din top 50
   dupa numarul de firme); tabelul afiseaza primele 100 de firme din acel cod, sortate
   descrescator dupa cifra_de_afaceri_neta, cu identitatea firmei + indicatorii financiari.
-
-Navigarea foloseste un `st.sidebar.radio` in loc de `st.tabs()`: `st.tabs()` e un widget
-pur client-side care nu expune in Python care tab e activ, deci nu exista cum sa aratam
-doar dropdown-ul relevant in sidebar daca navigarea ramane pe `st.tabs()`. Radio-ul rezolva
-asta - controleaza simultan continutul principal si care dropdown apare in sidebar.
 
 Datele L2 sunt Parquet (nu CSV) si sunt citite via DuckDB: filtrarea (pe judet sau pe cod
 CAEN) se face direct in fisier (predicate pushdown), fara sa incarcam tabelul intreg in
@@ -147,14 +143,12 @@ st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
 denumiri_caen = incarca_denumiri_caen()
 top_50_caen = incarca_top_50_caen()
 
-tab_selectat = st.sidebar.radio("Alege analiza", [NUME_TAB_JUDET, NUME_TAB_CAEN])
-st.sidebar.divider()
+tab_judet, tab_caen = st.tabs([NUME_TAB_JUDET, NUME_TAB_CAEN])
 
-st.header(tab_selectat)
-
-if tab_selectat == NUME_TAB_JUDET:
+with tab_judet:
+    st.header(NUME_TAB_JUDET)
     judete = [TOATA_TARA] + incarca_judete()
-    scop_selectat = st.sidebar.selectbox("Alege scopul", judete)
+    scop_selectat = st.selectbox("Alege scopul", judete)
 
     df_scop = incarca_scop(None if scop_selectat == TOATA_TARA else scop_selectat)
 
@@ -218,12 +212,13 @@ if tab_selectat == NUME_TAB_JUDET:
         st.subheader("Top 10 coduri CAEN - detaliu")
         st.dataframe(top_10_caen, hide_index=True)
 
-else:
+with tab_caen:
+    st.header(NUME_TAB_CAEN)
     optiuni_caen = {
         f"{rand['cod_caen']} — {rand['denumire_activitate']} ({rand['numar_firme']} firme)": rand["cod_caen"]
         for _, rand in top_50_caen.iterrows()
     }
-    eticheta_caen_selectata = st.sidebar.selectbox("Alege codul CAEN", list(optiuni_caen.keys()))
+    eticheta_caen_selectata = st.selectbox("Alege codul CAEN", list(optiuni_caen.keys()))
     cod_caen_selectat = optiuni_caen[eticheta_caen_selectata]
 
     denumire_selectata = top_50_caen.loc[
