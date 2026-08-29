@@ -9,7 +9,7 @@ sigur ca vrei sa ajunga pe Cloud.
 Ruleaza cu:
     streamlit run firme_dashboard.py
 
-Trei tab-uri clasice, orizontal sus pe pagina principala (`st.tabs()`); fiecare tab isi are
+Patru tab-uri clasice, orizontal sus pe pagina principala (`st.tabs()`); fiecare tab isi are
 propriul selector chiar sub titlul tab-ului, nu in sidebar:
 - "Analiza pe judet": utilizatorul alege intreaga tara sau un judet; interfata
   afiseaza 4 grafice (histograma cifrei de afaceri, histograma numarului de salariati, bar
@@ -24,6 +24,10 @@ propriul selector chiar sub titlul tab-ului, nu in sidebar:
   absoluta a cifrei de afaceri, (2) CAGR cifra de afaceri pe 4 ani (doar firme cu Revenue
   2021 >= 10.000.000 RON si cifra de afaceri pozitiva in ambii ani), (3) crestere absoluta
   a profitului net. Sursa: crestere_2021_2025_l2.parquet.
+- "Sectoarele in Ascensiune — 2021–2025": aceleasi firme, agregate pe diviziunea CAEN de 2
+  cifre (`cod_caen[:2]`, cod CAEN principal al firmei), cu denumiri lizibile de diviziune.
+  Aceleasi trei sectiuni ca mai sus, la nivel de sector; la CAGR se pastreaza doar
+  diviziunile cu cifra de afaceri agregata >= PRAG_MINIM_CIFRA_SECTOR in 2021.
 
 Datele L2 sunt Parquet (nu CSV) si sunt citite via DuckDB: filtrarea (pe judet sau pe cod
 CAEN) se face direct in fisier (predicate pushdown), fara sa incarcam tabelul intreg in
@@ -55,8 +59,110 @@ N_CAEN_CSV = DATA_DIR / "N_CAEN.csv"
 
 TOATA_TARA = "Toata tara"
 
-# Anii comparati in tab-ul "Campionii Cresterii" (vezi crestere_<start>_<end>_l2 in data-download-firme-rom.ipynb).
+# Anii comparati in tab-urile de crestere (vezi crestere_<start>_<end>_l2 in data-download-firme-rom.ipynb).
 CRESTERE_AN_START, CRESTERE_AN_END = 2021, 2025
+
+COL_REV_START = f"cifra_de_afaceri_neta_{CRESTERE_AN_START}"
+COL_REV_END = f"cifra_de_afaceri_neta_{CRESTERE_AN_END}"
+COL_PN_START = f"profitul_net_{CRESTERE_AN_START}"
+COL_PN_END = f"profitul_net_{CRESTERE_AN_END}"
+
+# Prag minim pentru cifra de afaceri agregata a unei diviziuni in anul de start, la sectiunea CAGR pe
+# sectoare - elimina diviziunile minuscule (cateva firme) unde un raport 2025/2021 devine nereprezentativ.
+PRAG_MINIM_CIFRA_SECTOR = 1_000_000_000
+
+# Denumiri lizibile pentru diviziunile CAEN de 2 cifre (CAEN Rev. 2). N_CAEN.csv are doar denumiri
+# la nivel de clasa (4 cifre), nu si la nivel de diviziune, asa ca le tinem aici ca referinta statica.
+DENUMIRI_DIVIZIUNE_CAEN = {
+    "01": "Agricultura, vanatoare si servicii anexe",
+    "02": "Silvicultura si exploatare forestiera",
+    "03": "Pescuitul si acvacultura",
+    "05": "Extractia carbunelui superior si inferior",
+    "06": "Extractia petrolului brut si a gazelor naturale",
+    "07": "Extractia minereurilor metalifere",
+    "08": "Alte activitati extractive",
+    "09": "Activitati de servicii anexe extractiei",
+    "10": "Industria alimentara",
+    "11": "Fabricarea bauturilor",
+    "12": "Fabricarea produselor din tutun",
+    "13": "Fabricarea produselor textile",
+    "14": "Fabricarea articolelor de imbracaminte",
+    "15": "Tabacirea pieilor; fabricarea articolelor din piele si a incaltamintei",
+    "16": "Prelucrarea lemnului si fabricarea produselor din lemn (exclusiv mobila)",
+    "17": "Fabricarea hartiei si a produselor din hartie",
+    "18": "Tiparirea si reproducerea pe suporti a inregistrarilor",
+    "19": "Fabricarea produselor de cocserie si din prelucrarea titeiului",
+    "20": "Fabricarea substantelor si a produselor chimice",
+    "21": "Fabricarea produselor farmaceutice de baza si a preparatelor farmaceutice",
+    "22": "Fabricarea produselor din cauciuc si mase plastice",
+    "23": "Fabricarea altor produse din minerale nemetalice",
+    "24": "Industria metalurgica",
+    "25": "Constructii metalice si produse din metal (exclusiv masini si utilaje)",
+    "26": "Fabricarea calculatoarelor si a produselor electronice si optice",
+    "27": "Fabricarea echipamentelor electrice",
+    "28": "Fabricarea de masini, utilaje si echipamente n.c.a.",
+    "29": "Fabricarea autovehiculelor de transport rutier, a remorcilor si semiremorcilor",
+    "30": "Fabricarea altor mijloace de transport",
+    "31": "Fabricarea de mobila",
+    "32": "Alte activitati industriale n.c.a.",
+    "33": "Repararea, intretinerea si instalarea masinilor si echipamentelor",
+    "35": "Productia si furnizarea de energie electrica si termica, gaze si aer conditionat",
+    "36": "Captarea, tratarea si distributia apei",
+    "37": "Colectarea si epurarea apelor uzate",
+    "38": "Colectarea, tratarea si eliminarea deseurilor; recuperarea materialelor reciclabile",
+    "39": "Activitati si servicii de decontaminare",
+    "41": "Constructii de cladiri",
+    "42": "Lucrari de geniu civil",
+    "43": "Lucrari speciale de constructii",
+    "45": "Comert si reparatii de autovehicule si motociclete",
+    "46": "Comert cu ridicata (exclusiv autovehicule si motociclete)",
+    "47": "Comert cu amanuntul (exclusiv autovehicule si motociclete)",
+    "49": "Transporturi terestre si transporturi prin conducte",
+    "50": "Transporturi pe apa",
+    "51": "Transporturi aeriene",
+    "52": "Depozitare si activitati auxiliare pentru transporturi",
+    "53": "Activitati de posta si de curier",
+    "55": "Hoteluri si alte facilitati de cazare",
+    "56": "Restaurante si alte activitati de servicii de alimentatie",
+    "58": "Activitati de editare",
+    "59": "Productie cinematografica, video si de programe TV; inregistrari audio",
+    "60": "Activitati de difuzare si transmitere de programe",
+    "61": "Telecomunicatii",
+    "62": "Activitati de servicii in tehnologia informatiei",
+    "63": "Activitati de servicii informatice",
+    "64": "Intermedieri financiare (exclusiv asigurari si fonduri de pensii)",
+    "65": "Activitati de asigurari, reasigurari si ale fondurilor de pensii",
+    "66": "Activitati auxiliare intermedierilor financiare si asigurarilor",
+    "68": "Tranzactii imobiliare",
+    "69": "Activitati juridice si de contabilitate",
+    "70": "Activitati ale sediilor centrale; consultanta in management",
+    "71": "Activitati de arhitectura si inginerie; testari si analize tehnice",
+    "72": "Cercetare-dezvoltare",
+    "73": "Publicitate si activitati de studiere a pietei",
+    "74": "Alte activitati profesionale, stiintifice si tehnice",
+    "75": "Activitati veterinare",
+    "77": "Activitati de inchiriere si leasing",
+    "78": "Activitati de servicii privind forta de munca",
+    "79": "Agentii turistice si tur-operatori; servicii de rezervare",
+    "80": "Activitati de investigatii si protectie",
+    "81": "Activitati de peisagistica si servicii pentru cladiri",
+    "82": "Activitati de secretariat si alte servicii suport pentru intreprinderi",
+    "84": "Administratie publica si aparare; asigurari sociale din sistemul public",
+    "85": "Invatamant",
+    "86": "Activitati referitoare la sanatatea umana",
+    "87": "Servicii de ingrijire medicala si asistenta sociala, cu cazare",
+    "88": "Activitati de asistenta sociala, fara cazare",
+    "90": "Activitati de creatie si interpretare artistica",
+    "91": "Activitati ale bibliotecilor, arhivelor, muzeelor si alte activitati culturale",
+    "92": "Activitati de jocuri de noroc si pariuri",
+    "93": "Activitati sportive, recreative si distractive",
+    "94": "Activitati asociative diverse",
+    "95": "Reparatii de calculatoare si de articole de uz personal si gospodaresc",
+    "96": "Alte activitati de servicii",
+    "97": "Activitati ale gospodariilor ca angajator de personal casnic",
+    "98": "Activitati ale gospodariilor de producere de bunuri si servicii pentru consum propriu",
+    "99": "Activitati ale organizatiilor si organismelor extrateritoriale",
+}
 
 COLOANE_TOP_FIRME = [
     "DENUMIRE", "cifra_de_afaceri_neta", "profitul_net", "numar_mediu_de_salariati", "datorii",
@@ -183,14 +289,16 @@ def _scurt(nume: str, maxim: int = 34) -> str:
     return nume if len(nume) <= maxim else nume[: maxim - 1] + "…"
 
 
-def bar_chart_orizontal(nume: pd.Series, valori: pd.Series, eticheta_x: str, culoare: str, formator_axa) -> None:
+def bar_chart_orizontal(
+    nume: pd.Series, valori: pd.Series, eticheta_x: str, culoare: str, formator_axa, maxim_eticheta: int = 34
+) -> None:
     """Bar chart orizontal cu top-ul sortat descrescator (cea mai mare valoare sus)."""
     ordine = np.argsort(valori.to_numpy())  # crescator -> cea mai mare bara ajunge in varf
     pozitii = np.arange(len(valori))
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.barh(pozitii, valori.to_numpy()[ordine], color=culoare)
     ax.set_yticks(pozitii)
-    ax.set_yticklabels([_scurt(n) for n in nume.to_numpy()[ordine]], fontsize=8)
+    ax.set_yticklabels([_scurt(n, maxim_eticheta) for n in nume.to_numpy()[ordine]], fontsize=8)
     ax.set_xlabel(eticheta_x)
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(formator_axa))
     ax.grid(True, alpha=0.3, axis="x")
@@ -201,7 +309,8 @@ def bar_chart_orizontal(nume: pd.Series, valori: pd.Series, eticheta_x: str, cul
 @st.cache_data
 def incarca_crestere() -> pd.DataFrame:
     """Firmele bl_bs_sl prezente in ambii ani comparati, cu cifra de afaceri neta si profitul net
-    pentru fiecare an + identitatea firmei (vezi crestere_<start>_<end>_l2 in notebook-ul de download)."""
+    pentru fiecare an + identitatea firmei + `cod_caen` (codul CAEN principal, 4 cifre)
+    (vezi crestere_<start>_<end>_l2 in notebook-ul de download)."""
     df = duckdb.sql(f"SELECT * FROM '{CRESTERE_PARQUET.as_posix()}'").df()
     df["DENUMIRE"] = df["DENUMIRE"].fillna("CUI " + df["cui"].astype(str))
     return df
@@ -210,6 +319,7 @@ def incarca_crestere() -> pd.DataFrame:
 NUME_TAB_JUDET = "Analiza pe judet"
 NUME_TAB_CAEN = "Analiza pe CAEN - baza"
 NUME_TAB_CRESTERE = f"Campionii Cresterii — {CRESTERE_AN_START}–{CRESTERE_AN_END}"
+NUME_TAB_SECTOARE = f"Sectoarele in Ascensiune — {CRESTERE_AN_START}–{CRESTERE_AN_END}"
 
 st.set_page_config(page_title="Firme din Romania - bl_bs_sl", layout="wide")
 st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
@@ -217,7 +327,9 @@ st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
 denumiri_caen = incarca_denumiri_caen()
 top_50_caen = incarca_top_50_caen()
 
-tab_judet, tab_caen, tab_crestere = st.tabs([NUME_TAB_JUDET, NUME_TAB_CAEN, NUME_TAB_CRESTERE])
+tab_judet, tab_caen, tab_crestere, tab_sectoare = st.tabs(
+    [NUME_TAB_JUDET, NUME_TAB_CAEN, NUME_TAB_CRESTERE, NUME_TAB_SECTOARE]
+)
 
 with tab_judet:
     st.header(NUME_TAB_JUDET)
@@ -308,10 +420,6 @@ with tab_crestere:
     st.header(NUME_TAB_CRESTERE)
 
     df_cr = incarca_crestere()
-    col_rev_start = f"cifra_de_afaceri_neta_{CRESTERE_AN_START}"
-    col_rev_end = f"cifra_de_afaceri_neta_{CRESTERE_AN_END}"
-    col_pn_start = f"profitul_net_{CRESTERE_AN_START}"
-    col_pn_end = f"profitul_net_{CRESTERE_AN_END}"
 
     st.caption(
         f"{len(df_cr):,}".replace(",", " ")
@@ -325,7 +433,7 @@ with tab_crestere:
     st.caption(f"revenue_growth = cifra_de_afaceri_neta_{CRESTERE_AN_END} − cifra_de_afaceri_neta_{CRESTERE_AN_START}")
 
     d1 = (
-        df_cr.assign(crestere=df_cr[col_rev_end] - df_cr[col_rev_start])
+        df_cr.assign(crestere=df_cr[COL_REV_END] - df_cr[COL_REV_START])
         .nlargest(10, "crestere")
         .reset_index(drop=True)
     )
@@ -333,8 +441,8 @@ with tab_crestere:
         pd.DataFrame({
             "Rank": np.arange(1, len(d1) + 1),
             "Company": d1["DENUMIRE"],
-            f"Revenue {CRESTERE_AN_START}": d1[col_rev_start].map(formateaza_ron),
-            f"Revenue {CRESTERE_AN_END}": d1[col_rev_end].map(formateaza_ron),
+            f"Revenue {CRESTERE_AN_START}": d1[COL_REV_START].map(formateaza_ron),
+            f"Revenue {CRESTERE_AN_END}": d1[COL_REV_END].map(formateaza_ron),
             "Increase (RON)": d1["crestere"].map(formateaza_ron),
         }),
         hide_index=True,
@@ -351,19 +459,19 @@ with tab_crestere:
     )
 
     eligibile = df_cr[
-        (df_cr[col_rev_start] > 0)
-        & (df_cr[col_rev_end] > 0)
-        & (df_cr[col_rev_start] >= 10_000_000)
+        (df_cr[COL_REV_START] > 0)
+        & (df_cr[COL_REV_END] > 0)
+        & (df_cr[COL_REV_START] >= 10_000_000)
     ].copy()
-    eligibile["cagr"] = (eligibile[col_rev_end] / eligibile[col_rev_start]) ** (1 / 4) - 1
+    eligibile["cagr"] = (eligibile[COL_REV_END] / eligibile[COL_REV_START]) ** (1 / 4) - 1
     d2 = eligibile.nlargest(10, "cagr").reset_index(drop=True)
 
     st.dataframe(
         pd.DataFrame({
             "Rank": np.arange(1, len(d2) + 1),
             "Company": d2["DENUMIRE"],
-            f"Revenue {CRESTERE_AN_START}": d2[col_rev_start].map(formateaza_ron),
-            f"Revenue {CRESTERE_AN_END}": d2[col_rev_end].map(formateaza_ron),
+            f"Revenue {CRESTERE_AN_START}": d2[COL_REV_START].map(formateaza_ron),
+            f"Revenue {CRESTERE_AN_END}": d2[COL_REV_END].map(formateaza_ron),
             "CAGR %": d2["cagr"].map(formateaza_procent),
         }),
         hide_index=True,
@@ -377,7 +485,7 @@ with tab_crestere:
     st.caption(f"profit_growth = profitul_net_{CRESTERE_AN_END} − profitul_net_{CRESTERE_AN_START}")
 
     d3 = (
-        df_cr.assign(crestere=df_cr[col_pn_end] - df_cr[col_pn_start])
+        df_cr.assign(crestere=df_cr[COL_PN_END] - df_cr[COL_PN_START])
         .nlargest(10, "crestere")
         .reset_index(drop=True)
     )
@@ -385,12 +493,117 @@ with tab_crestere:
         pd.DataFrame({
             "Rank": np.arange(1, len(d3) + 1),
             "Company": d3["DENUMIRE"],
-            f"Net Profit {CRESTERE_AN_START}": d3[col_pn_start].map(formateaza_ron),
-            f"Net Profit {CRESTERE_AN_END}": d3[col_pn_end].map(formateaza_ron),
+            f"Net Profit {CRESTERE_AN_START}": d3[COL_PN_START].map(formateaza_ron),
+            f"Net Profit {CRESTERE_AN_END}": d3[COL_PN_END].map(formateaza_ron),
             "Increase (RON)": d3["crestere"].map(formateaza_ron),
         }),
         hide_index=True,
     )
     bar_chart_orizontal(
         d3["DENUMIRE"], d3["crestere"], "crestere profit net (RON)", "indianred", _ron_axa
+    )
+
+with tab_sectoare:
+    st.header(NUME_TAB_SECTOARE)
+
+    df_sec = incarca_crestere()
+    df_sec = df_sec[df_sec["cod_caen"].notna()].copy()
+    df_sec["diviziune"] = df_sec["cod_caen"].str.slice(0, 2)
+
+    sectoare = df_sec.groupby("diviziune", as_index=False)[
+        [COL_REV_START, COL_REV_END, COL_PN_START, COL_PN_END]
+    ].sum()
+    sectoare["Sector"] = sectoare["diviziune"].map(
+        lambda d: DENUMIRI_DIVIZIUNE_CAEN.get(d, f"Diviziunea {d}")
+    )
+
+    st.caption(
+        f"{len(df_sec):,}".replace(",", " ")
+        + f" firme bl_bs_sl (prezente in {CRESTERE_AN_START} si {CRESTERE_AN_END}), agregate pe "
+        f"{len(sectoare)} diviziuni CAEN de 2 cifre dupa codul CAEN principal al firmei. "
+        f"Fiecare sectiune: Top 10, tabel + bar chart orizontal, sortate descrescator."
+    )
+
+    # ---- 1. Absolute Revenue Growth by Sector ----
+    st.subheader("1. Absolute Revenue Growth by Sector")
+    st.caption(
+        f"revenue_growth = total_revenue_{CRESTERE_AN_END} − total_revenue_{CRESTERE_AN_START} (pe diviziune)"
+    )
+    s1 = (
+        sectoare.assign(crestere=sectoare[COL_REV_END] - sectoare[COL_REV_START])
+        .nlargest(10, "crestere")
+        .reset_index(drop=True)
+    )
+    st.dataframe(
+        pd.DataFrame({
+            "Rank": np.arange(1, len(s1) + 1),
+            "CAEN": s1["diviziune"],
+            "Sector": s1["Sector"],
+            f"Revenue {CRESTERE_AN_START}": s1[COL_REV_START].map(formateaza_ron),
+            f"Revenue {CRESTERE_AN_END}": s1[COL_REV_END].map(formateaza_ron),
+            "Increase (RON)": s1["crestere"].map(formateaza_ron),
+        }),
+        hide_index=True,
+    )
+    bar_chart_orizontal(
+        s1["Sector"], s1["crestere"], "crestere cifra de afaceri (RON)", "seagreen", _ron_axa,
+        maxim_eticheta=52,
+    )
+
+    # ---- 2. Revenue CAGR by Sector ----
+    st.subheader("2. Revenue CAGR by Sector")
+    st.caption(
+        f"CAGR = (total_revenue_{CRESTERE_AN_END} / total_revenue_{CRESTERE_AN_START})^(1/4) − 1 · doar "
+        f"diviziuni cu cifra de afaceri agregata pozitiva in ambii ani si ≥ "
+        f"{formateaza_ron(PRAG_MINIM_CIFRA_SECTOR)} in {CRESTERE_AN_START}"
+    )
+    sectoare_eligibile = sectoare[
+        (sectoare[COL_REV_START] > 0)
+        & (sectoare[COL_REV_END] > 0)
+        & (sectoare[COL_REV_START] >= PRAG_MINIM_CIFRA_SECTOR)
+    ].copy()
+    sectoare_eligibile["cagr"] = (
+        sectoare_eligibile[COL_REV_END] / sectoare_eligibile[COL_REV_START]
+    ) ** (1 / 4) - 1
+    s2 = sectoare_eligibile.nlargest(10, "cagr").reset_index(drop=True)
+    st.dataframe(
+        pd.DataFrame({
+            "Rank": np.arange(1, len(s2) + 1),
+            "CAEN": s2["diviziune"],
+            "Sector": s2["Sector"],
+            f"Revenue {CRESTERE_AN_START}": s2[COL_REV_START].map(formateaza_ron),
+            f"Revenue {CRESTERE_AN_END}": s2[COL_REV_END].map(formateaza_ron),
+            "CAGR %": s2["cagr"].map(formateaza_procent),
+        }),
+        hide_index=True,
+    )
+    bar_chart_orizontal(
+        s2["Sector"], s2["cagr"], "CAGR", "steelblue", lambda x, _p: f"{x * 100:.0f}%",
+        maxim_eticheta=52,
+    )
+
+    # ---- 3. Absolute Net Profit Growth by Sector ----
+    st.subheader("3. Absolute Net Profit Growth by Sector")
+    st.caption(
+        f"profit_growth = total_net_profit_{CRESTERE_AN_END} − total_net_profit_{CRESTERE_AN_START} (pe diviziune)"
+    )
+    s3 = (
+        sectoare.assign(crestere=sectoare[COL_PN_END] - sectoare[COL_PN_START])
+        .nlargest(10, "crestere")
+        .reset_index(drop=True)
+    )
+    st.dataframe(
+        pd.DataFrame({
+            "Rank": np.arange(1, len(s3) + 1),
+            "CAEN": s3["diviziune"],
+            "Sector": s3["Sector"],
+            f"Net Profit {CRESTERE_AN_START}": s3[COL_PN_START].map(formateaza_ron),
+            f"Net Profit {CRESTERE_AN_END}": s3[COL_PN_END].map(formateaza_ron),
+            "Increase (RON)": s3["crestere"].map(formateaza_ron),
+        }),
+        hide_index=True,
+    )
+    bar_chart_orizontal(
+        s3["Sector"], s3["crestere"], "crestere profit net (RON)", "indianred", _ron_axa,
+        maxim_eticheta=52,
     )
