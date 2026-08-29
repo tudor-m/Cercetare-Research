@@ -22,3 +22,6 @@ Interfata visuala
 
 Interfata conversationala
 
+Public streamlit:
+
+https://cercetare-research-uazyjnkqdu3w2jjtdyappop.streamlit.app
