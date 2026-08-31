@@ -223,3 +223,23 @@ Note on "not in notebooks": the maps were only ever the Streamlit "Harta Crester
 Not committed.
 
 ----------------------------------------
+
+[2026-08-31]
+
+Q: I want to add a field showing the amount of taxes paid by companies in every year. That can be calculated as brut profit - net profit, is that true? If OK, calculate it. Then create a new analytics cell showing the top 20 tax payers each year.
+
+A: Partly true, with caveats - explained and implemented. In the Romanian P&L (contul de profit si pierdere), the line between "rezultatul brut" (pre-tax result) and "rezultatul net" (after-tax result) is exactly the tax charge, so:
+  impozit_pe_profit = rezultat_brut - rezultat_net
+  where rezultat_brut = profitul_brut - pierdere_bruta and rezultat_net = profitul_net - pierdere_neta (in each pair one term is 0).
+This captures ONLY the profit/income-tax line (impozit pe profit / pe venitul microintreprinderilor + impozit amanat). It does NOT include VAT, excise, payroll contributions, dividend tax or local taxes - so it understates total taxes paid. It can be slightly negative (deferred-tax income, adjustments). NOTE: the source's "profitul_brut/net" columns are the pre-/post-tax RESULT, not gross margin - so the identity holds; it would NOT hold if "brut" meant gross profit.
+
+Data: the L2 financials are per-year snapshots on data.gov.ro (situatii_financiare_<an>, bl_bs_sl category), years 2020-2025, loaded in data-download-firme-rom.ipynb as financiare[an]["bl_bs_sl"]["data_denumit"]. The existing bl_bs_sl_l2.parquet is 2025-only, so a new per-year file was needed.
+
+Implemented:
+1. New L2 file data.gov.ro/l2_data/impozit_pe_an_l2.{parquet,csv} - one row per (cui, an), 457,324 rows, 130,612 firms, 2020-2025. Columns: cui, an, cod_caen, cifra_de_afaceri_neta, rezultat_brut, rezultat_net, impozit_pe_profit. Firm identity NOT stored inline (joined from bl_bs_sl_l2 by cui, like caen_autorizat_l2) to keep size down (~8.6MB parquet). One aberrant source row (2020, CUI 42443305, "cifra de afaceri" 3e14 lei) is excluded via a >1e12-lei-per-line filter (only such row in all 6 years). Totals came out sane: impozit pe profit total 12.3 / 14.9 / 19.1 / 20.8 / 25.0 / 26.4 mld lei for 2020..2025 - matches Romania's actual corporate-income-tax collections.
+2. data-download-firme-rom.ipynb: new markdown + code cell after the "Campionii cresterii" cell (index 26/27) - builds impozit_pe_an_l2 from financiare[an]["bl_bs_sl"] for every year in ANI_ACTIVI, via the existing write_l2() helper, guarded by is_active("l2_firme_financiare").
+3. analytics-1-firme-rom.ipynb: added "impozit_pe_an" to L2_FILES in the loader cell (id 6ddf4074), plus a new markdown + code cell at the end ("Impozitul pe profit - top 20 platitori per an (2020-2025)"). It: (a) bar-charts total impozit pe profit per year + count of paying firms; (b) for each year, an itables table of the top 20 payers with DENUMIRE/ADR_JUDET/FORMA_JURIDICA/cod_caen/denumire_activitate/cifra_de_afaceri_neta/rezultat_brut/rezultat_net/impozit_pe_profit/rata_impozitare_pct, saved to dict top_20_impozit_per_an. Top payers are the expected names (Dacia, Dedeman, Lidl, Kaufland, tobacco, oil, retail); Dacia's effective rate ~32-35% reflects non-deductible items + the 2024 turnover tax (IMCA) also landing on that P&L line.
+
+The parquet/csv were generated now via a standalone script (scratchpad/build_impozit.py) reading the per-year web_bl_bs_sl_an<an>.txt files directly, so the analytics cell works without re-running the heavy download notebook. Both notebooks validated with nbformat. Not committed. Data files live outside the repo (Data-for-Projects/...), not in git; the App/data dashboard copy was intentionally not added (dashboard doesn't consume it).
+
+----------------------------------------
