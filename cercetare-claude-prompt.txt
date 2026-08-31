@@ -243,3 +243,43 @@ Implemented:
 The parquet/csv were generated now via a standalone script (scratchpad/build_impozit.py) reading the per-year web_bl_bs_sl_an<an>.txt files directly, so the analytics cell works without re-running the heavy download notebook. Both notebooks validated with nbformat. Not committed. Data files live outside the repo (Data-for-Projects/...), not in git; the App/data dashboard copy was intentionally not added (dashboard doesn't consume it).
 
 ----------------------------------------
+
+Q: Calculate the top "impozit cheaters" - companies with very big revenue (cifra de afaceri) but very low (still positive) net profit. How can we do that?
+
+A: Explained the method and added a new analytics cell. There is no way to *prove* evasion from this data - it's a screening flag. The pattern targeted: a firm reporting a barely-positive net result year after year on large revenue (classic taxable-profit "flattening" via transfer pricing, intra-group management fees / royalties / interest, over-invoicing from affiliates).
+
+Method (on impozit_pe_an_l2.parquet, 2020-2025):
+- marja_neta = rezultat_net / cifra_de_afaceri_neta.
+- Keep only firms with cifra_de_afaceri_neta >= PRAG_CIFRA_AFACERI (default 50M lei) AND rezultat_net > 0 (losses are a separate story).
+- Sector benchmark: marja_mediana_sector = median net margin of the firm's 2-digit CAEN division, per year (compare a firm to its own sector, not the whole economy - 1% margin where peers run 8% is more suspect than 1% in fuel distribution where everyone is ~1%).
+- profit_sub_norma = max(0, marja_mediana_sector - marja_neta) * cifra_de_afaceri_neta = the extra profit the firm would have reported at its sector's median margin.
+- impozit_potential_lipsa = COTA_IMPOZIT (0.16) * profit_sub_norma - a rough estimate.
+- marja_sub_prag = marja_neta < PRAG_MARJA_NETA (default 1%).
+
+Considered but dropped: TARA_FIRMA_MAMA (foreign-parent flag) is only ~0.6% populated in bl_bs_sl_l2 - useless. CAEN division *names* are not in N_CAEN.csv (all rows are leaf classes), and the SECTIUNEA lettering in that file is non-standard, so the cell shows the 2-digit division code + the firm's own 4-digit activity name instead.
+
+New cell in analytics-1-firme-rom.ipynb (markdown id 50a94f4f + code id 2a2e7a00, after the "Impozitul pe profit - top 20 platitori" cell). Parameters PRAG_CIFRA_AFACERI / PRAG_MARJA_NETA / MIN_ANI / COTA_IMPOZIT exposed at the top. Outputs: (1) scatter log10(revenue) vs net margin for the latest year, flagged points in red; (2) per-year top-20 flagged firms by profit_sub_norma -> dict cheaters_per_an; (3) aggregate 2020-2025 DataFrame impozit_cheaters (>= MIN_ANI years above the revenue threshold), sorted by cumulative impozit_potential_lipsa, with ani_marja_sub_prag / marja_neta_mediana / marja_neta_std; (4) cronici = firms with margin < prag in >= 3 years and median margin < prag.
+
+Heavy caveats written into the markdown: NOT proof of evasion. Thin (<1-2%) net margins are normal in distribution/wholesale (fuel, pharma, FMCG, grain), food retail, energy supply, commodity trading, price-regulated activities - and that's most of the list. The cumulative-lei score mechanically favours the largest-revenue firms even at near-normal margins (Dacia, OMV Petrom Marketing show up), so it must be read next to marja_neta_mediana and ani_marja_sub_prag, not alone; the `cronici` table is the better-targeted view. rezultat_net is the accounting result, not the fiscal base; micro-enterprises are taxed on turnover; transfer pricing can be fully legal.
+
+Verified the logic on the data (runs ~1s): ~4,900 firms in the aggregate, 255 "cronic". Top cronic names: Metro Cash & Carry, Dr.Max, Interbrands Orbico, Farmexim, Renault Commercial Roumanie, Viterra, Socar Petroleum - all persistent sub-1% net margin at multi-billion-lei revenue. Not committed (previous turn's work was committed by the user as 3609416 "Updates").
+
+----------------------------------------
+
+Q: Implement a new analytics cell (or cells) and an associated Streamlit tab called "Profitabilitatea Sectoarelor - 2021-2025". Aggregate companies by 4-digit CAEN code, per year 2021-2025: sector_net_result = sum(profitul_net) - sum(pierderea_neta); sector_profit_margin = sector_net_result / sum(cifra_de_afaceri_neta). Filters: >= 20 companies, >= 50M RON total revenue, positive revenue. Per year: Top 50 and Bottom 50 sectors by margin (table + horizontal bar chart), year selector. Plus a five-year persistence analysis (Most Consistently Profitable / Low-Profit sectors, appearances in Top/Bottom 50 + per-year margins), with visuals. Readable CAEN names, project conventions, compact RON / percent formatting.
+
+A: Done - one new L2 file, a data-download builder cell, an analytics cell, and a Streamlit tab in both dashboard files.
+
+1. New L2 file data.gov.ro/l2_data/profitabilitate_sectoare_2021_2025_l2.{parquet,csv} (+ copy in RomanianComp/App/data/, ~54 KB, git-tracked) - one row per (an, cod_caen 4 cifre), 3075 rows, 726 distinct CAEN codes, 2021-2025. Columns: an, cod_caen, numar_firme, cifra_de_afaceri_neta_totala, rezultat_net_total (= sum(profitul_net) - sum(pierderea_neta) per sector, since impozit_pe_an_l2.rezultat_net = profitul_net - pierdere_neta per company). NO filters stored - the 20-firm / 50M thresholds are applied downstream so they stay tunable. Built by aggregating impozit_pe_an_l2 (dedup per cui/year, aberrant >1e12 row already excluded). Generated now via scratchpad/build_profitabilitate.py.
+
+2. data-download-firme-rom.ipynb: new markdown + code cell after "Impozitul pe profit per firma si an" (cells 28/29), aggregates l2_data["impozit_pe_an"] -> profitabilitate_sectoare via write_l2. Notebook now 33 cells.
+
+3. analytics-1-firme-rom.ipynb: added "profitabilitate_sectoare_2021_2025" to L2_FILES (cell 6ddf4074); new markdown (id 0082e708) + code (id 5c708095) cell "Profitabilitatea Sectoarelor - 2021-2025" after the cheaters cell. Params PRAG_FIRME_SECTOR=20 / PRAG_CIFRA_SECTOR=50_000_000 / TOP_N_SECTOARE=50 exposed at top. Per year (loop over all 5): Top 50 + Bottom 50 tables (Rank | CAEN | Sector | Companies | Total Revenue | Net Result | Profit Margin %) + a 2-panel horizontal bar chart. Then persistence: pers_top / pers_bottom DataFrames (appearances in Top/Bottom 50, avg margin over eligible years, per-year margins), sorted by appearances then avg margin; two tables + a sector x year heatmap. Notebook now 22 cells. Local _fmt_ron / _fmt_pct helpers.
+
+4. firme_dashboard.py + firme_dashboard_local.py (bodies identical - patched both identically via scratchpad/patch_dashboard.py): new rightmost tab tab_profitabilitate. Module-level: PROFITABILITATE_PARQUET path, ANI_PROFITABILITATE_SECTOARE / PRAG_FIRME_SECTOR / PRAG_CIFRA_SECTOR_PROFITABILITATE / TOP_N_SECTOARE_PROFITABILITATE consts, incarca_profitabilitate_sectoare() (@st.cache_data), _bar_sectoare_profit(), _heatmap_persistenta(). Tab: st.radio horizontal year selector (2021-2025, default 2025); for the chosen year Top 50 + Bottom 50 (st.dataframe + bar chart); then st.divider() + persistence section - two side-by-side columns (Most Consistently Profitable / Low-Profit) each with a 25-row table + a 20-row heatmap. Uses existing formateaza_ron / formateaza_procent / _scurt. Docstrings updated ("Cinci" -> "Sase" tab-uri + new bullet).
+
+Notes / caveats documented in both surfaces: holding / financial-intermediation codes (64xx, 66xx) can show >100% margin because cifra de afaceri neta doesn't capture their income (dividends, investments) - kept in tables, excluded from bar charts (|margin| <= 100%). Data mixes CAEN versions across years (a firm reports under the version in force) e.g. 6420 vs 6421 "holding-uri" in 2025. rezultat_net is the accounting result.
+
+Verified: both notebooks validate with nbformat; both dashboards pass streamlit AppTest with no exceptions on first run and after switching the year radio to 2022; standalone run of the analytics cell logic produces sane results (e.g. 2024: 362 eligible sectors; most consistently profitable = holdinguri, intermedieri financiare, colectarea apelor uzate, fabricarea preparatelor farmaceutice, productie cinematografica; most consistently low-profit = furnizarea de abur si aer conditionat, telecomunicatii prin cablu, fabricarea de echipamente de iluminat, productia de tesaturi). Not committed. App/data/profitabilitate_sectoare_2021_2025_l2.parquet is a new untracked file to be git-added on commit.
+
+----------------------------------------

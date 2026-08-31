@@ -9,7 +9,7 @@ sigur ca vrei sa ajunga pe Cloud.
 Ruleaza cu:
     streamlit run firme_dashboard.py
 
-Cinci tab-uri clasice, orizontal sus pe pagina principala (`st.tabs()`); fiecare tab isi are
+Sase tab-uri clasice, orizontal sus pe pagina principala (`st.tabs()`); fiecare tab isi are
 propriul selector chiar sub titlul tab-ului, nu in sidebar:
 - "Analiza pe judet": utilizatorul alege intreaga tara sau un judet; interfata
   afiseaza 4 grafice (histograma cifrei de afaceri, histograma numarului de salariati, bar
@@ -32,6 +32,13 @@ propriul selector chiar sub titlul tab-ului, nu in sidebar:
   sectiuni (crestere absoluta cifra de afaceri, CAGR, crestere absoluta profit net), fiecare
   cu Top 10 (tabel + bar chart) si o harta choropleth Plotly a tuturor celor 42 de judete
   (tooltip: judet + valoare). Conturul judetelor: `judete_ro.geojson` (GADM, NAME_1).
+- "Profitabilitatea Sectoarelor — 2021–2025": agregare pe codul CAEN de 4 cifre, separat pe
+  fiecare an 2021-2025 (sursa: profitabilitate_sectoare_2021_2025_l2.parquet). Selector de an;
+  pentru anul ales: Top 50 si Bottom 50 sectoare dupa marja de profit
+  (sector_net_result = Σ profit net − Σ pierdere neta; margin = net_result / Σ cifra de afaceri),
+  fiecare cu tabel + bar chart orizontal, dupa filtrele minim 20 firme / 50 mil RON pe sector/an.
+  Plus analiza persistentei pe 5 ani: cele mai constant profitabile / slab profitabile sectoare
+  (numar de aparitii in Top/Bottom 50 + marja pe fiecare an), cu heatmap.
 
 Datele L2 sunt Parquet (nu CSV) si sunt citite via DuckDB: filtrarea (pe judet sau pe cod
 CAEN) se face direct in fisier (predicate pushdown), fara sa incarcam tabelul intreg in
@@ -64,6 +71,7 @@ BL_BS_SL_PARQUET = DATA_DIR / "bl_bs_sl_l2.parquet"
 CRESTERE_PARQUET = DATA_DIR / "crestere_2021_2025_l2.parquet"
 GEOJSON_JUDETE = DATA_DIR / "judete_ro.geojson"
 N_CAEN_CSV = DATA_DIR / "N_CAEN.csv"
+PROFITABILITATE_PARQUET = DATA_DIR / "profitabilitate_sectoare_2021_2025_l2.parquet"
 
 TOATA_TARA = "Toata tara"
 
@@ -78,6 +86,13 @@ COL_PN_END = f"profitul_net_{CRESTERE_AN_END}"
 # Prag minim pentru cifra de afaceri agregata a unei diviziuni in anul de start, la sectiunea CAGR pe
 # sectoare - elimina diviziunile minuscule (cateva firme) unde un raport 2025/2021 devine nereprezentativ.
 PRAG_MINIM_CIFRA_SECTOR = 1_000_000_000
+
+# Tab "Profitabilitatea Sectoarelor": praguri de eligibilitate a unui cod CAEN de 4 cifre intr-un
+# an (vezi profitabilitate_sectoare_2021_2025_l2 in data-download-firme-rom.ipynb).
+ANI_PROFITABILITATE_SECTOARE = [2021, 2022, 2023, 2024, 2025]
+PRAG_FIRME_SECTOR = 20
+PRAG_CIFRA_SECTOR_PROFITABILITATE = 50_000_000
+TOP_N_SECTOARE_PROFITABILITATE = 50
 
 # Denumiri lizibile pentru diviziunile CAEN de 2 cifre (CAEN Rev. 2). N_CAEN.csv are doar denumiri
 # la nivel de clasa (4 cifre), nu si la nivel de diviziune, asa ca le tinem aici ca referinta statica.
@@ -315,6 +330,52 @@ def bar_chart_orizontal(
     st.pyplot(fig)
 
 
+def _bar_sectoare_profit(d: pd.DataFrame, culoare: str, titlu: str) -> None:
+    """Bar chart orizontal cu marja de profit pe sector (Rank 1 sus). Exclude marjele > 100%
+    (holdinguri / intermedieri financiare - cifra de afaceri nu reflecta activitatea lor)."""
+    dd = d[d["profit_margin"].abs() <= 1.0]
+    etichete = [f"{c} · {_scurt(s, 40)}" for c, s in zip(dd["cod_caen"], dd["Sector"])]
+    pozitii = np.arange(len(dd))
+    fig, ax = plt.subplots(figsize=(9, max(4.0, len(dd) * 0.26)))
+    ax.barh(pozitii, dd["profit_margin"] * 100, color=culoare)
+    ax.set_yticks(pozitii)
+    ax.set_yticklabels(etichete, fontsize=7)
+    ax.invert_yaxis()  # Rank 1 sus
+    ax.axvline(0, color="black", lw=0.6)
+    ax.set_xlabel("marja de profit (%)")
+    ax.set_title(titlu, fontsize=10)
+    ax.grid(True, alpha=0.3, axis="x")
+    fig.tight_layout()
+    st.pyplot(fig)
+
+
+def _heatmap_persistenta(p: pd.DataFrame, cmap: str, titlu: str) -> None:
+    """Heatmap sector x an, culoare = marja de profit (%). Celule goale = sector neeligibil in acel an."""
+    matrice = p.set_index("cod_caen")[ANI_PROFITABILITATE_SECTOARE].astype(float).to_numpy() * 100
+    fig, ax = plt.subplots(figsize=(6, max(4.0, len(p) * 0.32)))
+    imagine = ax.imshow(matrice, aspect="auto", cmap=cmap)
+    ax.set_xticks(range(len(ANI_PROFITABILITATE_SECTOARE)))
+    ax.set_xticklabels(ANI_PROFITABILITATE_SECTOARE)
+    ax.set_yticks(range(len(p)))
+    ax.set_yticklabels(
+        [f"{c} · {_scurt(s, 32)}" for c, s in zip(p["cod_caen"], p["Sector"])], fontsize=7
+    )
+    ax.set_title(titlu, fontsize=10)
+    fig.colorbar(imagine, ax=ax, fraction=0.05, pad=0.03, label="marja %")
+    fig.tight_layout()
+    st.pyplot(fig)
+
+
+@st.cache_data
+def incarca_profitabilitate_sectoare() -> pd.DataFrame:
+    """Agregat per (an, cod_caen de 4 cifre), 2021-2025: numar firme, cifra de afaceri neta totala,
+    rezultat net total (= sum(profitul_net) - sum(pierderea_neta) pe sector). Marja se calculeaza aici."""
+    df = duckdb.sql(f"SELECT * FROM '{PROFITABILITATE_PARQUET.as_posix()}'").df()
+    df["profit_margin"] = df["rezultat_net_total"] / df["cifra_de_afaceri_neta_totala"]
+    df["Sector"] = df["cod_caen"].map(incarca_denumiri_caen()).fillna("denumire necunoscuta")
+    return df
+
+
 def _cheie_judet(nume: str) -> str:
     """Cheie de potrivire intre ADR_JUDET si numele judetului din GeoJSON (fara diacritice, minuscule)."""
     fara_diacritice = unicodedata.normalize("NFKD", str(nume)).encode("ascii", "ignore").decode("ascii")
@@ -393,6 +454,7 @@ NUME_TAB_CAEN = "Analiza pe CAEN - baza"
 NUME_TAB_CRESTERE = f"Campionii Cresterii — {CRESTERE_AN_START}–{CRESTERE_AN_END}"
 NUME_TAB_SECTOARE = f"Sectoarele in Ascensiune — {CRESTERE_AN_START}–{CRESTERE_AN_END}"
 NUME_TAB_HARTA = f"Harta Cresterii — {CRESTERE_AN_START}–{CRESTERE_AN_END}"
+NUME_TAB_PROFITABILITATE = f"Profitabilitatea Sectoarelor — {CRESTERE_AN_START}–{CRESTERE_AN_END}"
 
 st.set_page_config(page_title="Firme din Romania - bl_bs_sl", layout="wide")
 st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
@@ -400,8 +462,9 @@ st.title("Firme din Romania - situatii financiare (bl_bs_sl)")
 denumiri_caen = incarca_denumiri_caen()
 top_50_caen = incarca_top_50_caen()
 
-tab_judet, tab_caen, tab_crestere, tab_sectoare, tab_harta = st.tabs(
-    [NUME_TAB_JUDET, NUME_TAB_CAEN, NUME_TAB_CRESTERE, NUME_TAB_SECTOARE, NUME_TAB_HARTA]
+tab_judet, tab_caen, tab_crestere, tab_sectoare, tab_harta, tab_profitabilitate = st.tabs(
+    [NUME_TAB_JUDET, NUME_TAB_CAEN, NUME_TAB_CRESTERE, NUME_TAB_SECTOARE, NUME_TAB_HARTA,
+     NUME_TAB_PROFITABILITATE]
 )
 
 with tab_judet:
@@ -783,3 +846,115 @@ with tab_harta:
         harta_judete(
             h3, "crestere", "Crestere profit net (RON)", "RdYlGn", formateaza_ron, divergent=True
         )
+
+
+with tab_profitabilitate:
+    st.header(NUME_TAB_PROFITABILITATE)
+
+    prof = incarca_profitabilitate_sectoare()
+    eligibile = prof[
+        (prof["numar_firme"] >= PRAG_FIRME_SECTOR)
+        & (prof["cifra_de_afaceri_neta_totala"] >= PRAG_CIFRA_SECTOR_PROFITABILITATE)
+        & (prof["cifra_de_afaceri_neta_totala"] > 0)
+    ].copy()
+
+    st.caption(
+        "Agregare pe codul CAEN de 4 cifre, separat pe fiecare an. "
+        "sector_net_result = Σ profit net − Σ pierdere neta · "
+        "sector_profit_margin = sector_net_result / Σ cifra de afaceri neta. "
+        f"Filtre inainte de ranking: minim {PRAG_FIRME_SECTOR} firme si "
+        f"{formateaza_ron(PRAG_CIFRA_SECTOR_PROFITABILITATE)} cifra de afaceri pe sector/an. "
+        "Holdingurile / intermedierile financiare (64xx, 66xx) pot depasi 100% marja — cifra de "
+        "afaceri nu le reflecta veniturile; raman in tabel, dar ies din grafic."
+    )
+
+    def _rang_sectoare(df_an: pd.DataFrame, ascendent: bool) -> pd.DataFrame:
+        return (
+            df_an.sort_values("profit_margin", ascending=ascendent)
+            .head(TOP_N_SECTOARE_PROFITABILITATE)
+            .reset_index(drop=True)
+        )
+
+    top_pe_an = {
+        an: _rang_sectoare(eligibile[eligibile["an"] == an], ascendent=False)
+        for an in ANI_PROFITABILITATE_SECTOARE
+    }
+    bottom_pe_an = {
+        an: _rang_sectoare(eligibile[eligibile["an"] == an], ascendent=True)
+        for an in ANI_PROFITABILITATE_SECTOARE
+    }
+
+    def _tabel_sectoare(d: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame({
+            "Rank": np.arange(1, len(d) + 1),
+            "CAEN": d["cod_caen"],
+            "Sector": d["Sector"],
+            "Companies": d["numar_firme"],
+            "Total Revenue": d["cifra_de_afaceri_neta_totala"].map(formateaza_ron),
+            "Net Result": d["rezultat_net_total"].map(formateaza_ron),
+            "Profit Margin %": d["profit_margin"].map(formateaza_procent),
+        })
+
+    an_ales = st.radio(
+        "Anul", ANI_PROFITABILITATE_SECTOARE,
+        index=len(ANI_PROFITABILITATE_SECTOARE) - 1, horizontal=True,
+    )
+    d_top, d_bot = top_pe_an[an_ales], bottom_pe_an[an_ales]
+    st.caption(f"{an_ales}: {int((eligibile['an'] == an_ales).sum())} sectoare CAEN eligibile.")
+
+    st.subheader(f"1. Top 50 Sectors by Profit Margin — {an_ales}")
+    st.dataframe(_tabel_sectoare(d_top), hide_index=True)
+    _bar_sectoare_profit(d_top, "seagreen", f"Top 50 sectoare — marja de profit ({an_ales})")
+
+    st.subheader(f"2. Bottom 50 Sectors by Profit Margin — {an_ales}")
+    st.dataframe(_tabel_sectoare(d_bot), hide_index=True)
+    _bar_sectoare_profit(d_bot, "indianred", f"Bottom 50 sectoare — marja de profit ({an_ales})")
+
+    # ---- 3. Persistenta pe 5 ani ----
+    st.divider()
+    st.subheader(f"3. Five-Year Persistence Analysis — {CRESTERE_AN_START}–{CRESTERE_AN_END}")
+    st.caption(
+        "De cate ori apare fiecare cod CAEN in Top 50 / Bottom 50 pe cei 5 ani. "
+        "Sortare: numarul de aparitii, apoi marja medie. Coloanele de an = marja sectorului in acel an "
+        "(— daca nu a fost eligibil)."
+    )
+
+    margini_pe_an = (
+        eligibile.pivot_table(index="cod_caen", columns="an", values="profit_margin")
+        .reindex(columns=ANI_PROFITABILITATE_SECTOARE)
+    )
+
+    def _persistenta(dct_pe_an: dict, ascendent: bool) -> pd.DataFrame:
+        hits = pd.concat([d.assign(an=a) for a, d in dct_pe_an.items()], ignore_index=True)
+        aparitii = hits.groupby("cod_caen").size().rename("aparitii")
+        p = margini_pe_an.loc[aparitii.index].copy()
+        p.insert(0, "aparitii", aparitii)
+        p["avg_margin"] = p[ANI_PROFITABILITATE_SECTOARE].mean(axis=1)
+        p["Sector"] = p.index.map(incarca_denumiri_caen()).fillna("denumire necunoscuta")
+        return (
+            p.sort_values(["aparitii", "avg_margin"], ascending=[False, ascendent])
+            .reset_index()
+        )
+
+    pers_top = _persistenta(top_pe_an, ascendent=False)
+    pers_bottom = _persistenta(bottom_pe_an, ascendent=True)
+
+    def _tabel_persistenta(p: pd.DataFrame, eticheta_ani: str) -> pd.DataFrame:
+        return pd.DataFrame({
+            "Rank": np.arange(1, len(p) + 1),
+            "CAEN": p["cod_caen"],
+            "Sector": p["Sector"],
+            eticheta_ani: p["aparitii"].astype(int),
+            "Avg Profit Margin": p["avg_margin"].map(formateaza_procent),
+            **{str(an): p[an].map(formateaza_procent) for an in ANI_PROFITABILITATE_SECTOARE},
+        })
+
+    col_profit, col_pierdere = st.columns(2)
+    with col_profit:
+        st.markdown("**Most Consistently Profitable Sectors**")
+        st.dataframe(_tabel_persistenta(pers_top.head(25), "Top-50 Years"), hide_index=True)
+        _heatmap_persistenta(pers_top.head(20), "Greens", "Marja % pe an — cele mai constant profitabile")
+    with col_pierdere:
+        st.markdown("**Most Consistently Low-Profit Sectors**")
+        st.dataframe(_tabel_persistenta(pers_bottom.head(25), "Bottom-50 Years"), hide_index=True)
+        _heatmap_persistenta(pers_bottom.head(20), "Reds_r", "Marja % pe an — cele mai constant slabe")
